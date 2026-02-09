@@ -1,0 +1,184 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String?  @unique
+  mobile    String?  @unique
+  password  String
+  role      String // admin, cashier, manager
+  branch    String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model Product {
+  id           Int           @id @default(autoincrement())
+  name         String
+  stock        Int
+  price        Float
+  invoiceItems InvoiceItem[]
+  createdAt    DateTime      @default(now())
+
+  salesReturnItems SalesReturnItem[]
+  quotationItems   QuotationItem[]
+}
+
+model Invoice {
+  id            Int           @id @default(autoincrement())
+  invoiceNumber String        @unique
+  partyId       Int
+  party         Party         @relation(fields: [partyId], references: [id])
+  subTotal      Float
+  taxAmount     Float
+  totalAmount   Float
+  items         InvoiceItem[]
+  salesReturns  SalesReturn[]
+  createdAt     DateTime      @default(now())
+}
+
+model PartyLedger {
+  id        Int        @id @default(autoincrement())
+  partyId   Int
+  type      LedgerType
+  amount    Float
+  reference String
+  createdAt DateTime   @default(now())
+
+  party Party @relation(fields: [partyId], references: [id])
+}
+
+enum LedgerType {
+  DEBIT
+  CREDIT
+}
+
+model SalesReturn {
+  id          Int      @id @default(autoincrement())
+  invoiceId   Int
+  partyId     Int
+  totalAmount Float
+  createdAt   DateTime @default(now())
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id])
+  party       Party    @relation(fields: [partyId], references: [id])
+
+  items SalesReturnItem[]
+}
+
+model SalesReturnItem {
+  id            Int   @id @default(autoincrement())
+  salesReturnId Int
+  productId     Int
+  quantity      Int
+  price         Float
+
+  salesReturn SalesReturn @relation(fields: [salesReturnId], references: [id])
+  product     Product     @relation(fields: [productId], references: [id])
+}
+
+model Quotation {
+  id        Int             @id @default(autoincrement())
+  partyId   Int
+  date      DateTime
+  validTill DateTime
+  subtotal  Float
+  discount  Float
+  tax       Float
+  total     Float
+  status    QuotationStatus @default(OPEN)
+
+  items QuotationItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model QuotationItem {
+  id          Int     @id @default(autoincrement())
+  quotationId Int
+  productId   Int
+  quantity    Int
+  price       Float
+  total       Float
+  product     Product @relation(fields: [productId], references: [id])
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+}
+
+enum QuotationStatus {
+  OPEN
+  CONVERTED
+  CANCELLED
+}
+
+model ProformaInvoice {
+  id             String   @id @default(uuid())
+  proformaNumber String   @unique
+  date           DateTime @default(now())
+
+  customerName  String
+  customerPhone String?
+
+  quotationId String? // optional link to quotation
+
+  subTotal       Float
+  taxAmount      Float
+  discountAmount Float @default(0)
+  grandTotal     Float
+
+  status ProformaStatus @default(DRAFT)
+
+  items ProformaInvoiceItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ProformaInvoiceItem {
+  id                String @id @default(uuid())
+  proformaInvoiceId String
+
+  productName String
+  quantity    Int
+  rate        Float
+  taxPercent  Float
+  taxAmount   Float
+  total       Float
+
+  proformaInvoice ProformaInvoice @relation(fields: [proformaInvoiceId], references: [id], onDelete: Cascade)
+}
+
+enum ProformaStatus {
+  DRAFT
+  SENT
+  CANCELLED
+}
+
+model Party {
+  id           Int           @id @default(autoincrement())
+  name         String
+  phone        String?
+  invoices     Invoice[]
+  ledgers      PartyLedger[]
+  salesReturns SalesReturn[]
+  createdAt    DateTime      @default(now())
+}
+
+model InvoiceItem {
+  id        Int   @id @default(autoincrement())
+  invoiceId Int
+  productId Int
+  quantity  Int
+  price     Float
+  total     Float
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+}
