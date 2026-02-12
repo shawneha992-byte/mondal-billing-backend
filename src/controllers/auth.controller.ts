@@ -53,10 +53,25 @@ export const login = async (req: Request, res: Response) => {
   });
 };
 
-export const me = async (req: Request, res: Response) => {
-  res.json((req as any).user);
-};
+  export const me = async (req: Request, res: Response) => {
+  const userId = (req as any).user.id;
 
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      name: true,
+      role: true,
+      branch: true,
+    },
+  });
+
+  if (!user) {
+    return res.status(404).json({ message: "User not found" });
+  }
+
+  res.json(user);
+};
 export const forgotPassword = async (_req: Request, res: Response) => {
   res.json({ message: "Reset link sent (mock)" });
-};   
+};

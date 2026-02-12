@@ -12,13 +12,15 @@ export const createInvoice = async (req: Request, res: Response) => {
     const invoice = await prisma.$transaction(async (tx) => {
       let subTotal = 0;
 
-      // 1. Validate stock + subtotal
+      // 1️⃣ Validate stock & calculate subtotal
       for (const item of items) {
         const product = await tx.product.findUnique({
           where: { id: item.productId },
         });
 
-        if (!product) throw new Error("Product not found");
+        if (!product) {
+          throw new Error(`Product not found (ID: ${item.productId})`);
+        }
 
         if (product.stock < item.quantity) {
           throw new Error(`Insufficient stock for ${product.name}`);
@@ -27,14 +29,14 @@ export const createInvoice = async (req: Request, res: Response) => {
         subTotal += item.price * item.quantity;
       }
 
-      // 2. Tax calculation
+      // 2️⃣ Tax & total
       const taxAmount = subTotal * 0.18;
       const totalAmount = subTotal + taxAmount;
 
-      // 3. Create invoice
+      // 3️⃣ Create invoice
       const invoice = await tx.invoice.create({
         data: {
-          invoiceNumber: `INV-${Date.now()}`,
+          invoiceNumber: `INV-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           partyId,
           subTotal,
           taxAmount,
@@ -50,17 +52,19 @@ export const createInvoice = async (req: Request, res: Response) => {
         },
       });
 
-      // 4. Reduce stock
+      // 4️⃣ Reduce product stock
       for (const item of items) {
         await tx.product.update({
           where: { id: item.productId },
           data: {
-            stock: { decrement: item.quantity },
+            stock: {
+              decrement: item.quantity,
+            },
           },
         });
       }
 
-      // 5. Party Ledger (Debit)
+      // 5️⃣ Party Ledger (DEBIT)
       await tx.partyLedger.create({
         data: {
           partyId,
@@ -73,21 +77,35 @@ export const createInvoice = async (req: Request, res: Response) => {
       return invoice;
     });
 
-    res.status(201).json({ message: "Invoice created", invoice });
+    res.status(201).json({
+      message: "Invoice created successfully",
+      invoice,
+    });
   } catch (error: any) {
+    console.error("Create invoice error:", error);
     res.status(400).json({ error: error.message });
   }
 };
 
 export const getInvoices = async (_req: Request, res: Response) => {
-  const invoices = await prisma.invoice.findMany({
-    include: {
-      party: true,
-      items: {
-        include: { product: true },
+  try {
+    const invoices = await prisma.invoice.findMany({
+      include: {
+        party: true,
+        items: {
+          include: {
+            product: true,
+          },
+        },
       },
-    },
-  });
+      orderBy: {
+        createdAt: "desc",
+      },
+    });
 
-  res.json(invoices);
+    res.json(invoices);
+  } catch (error) {
+    console.error("Fetch invoices error:", error);
+    res.status(500).json({ message: "Failed to fetch invoices" });
+  }
 };

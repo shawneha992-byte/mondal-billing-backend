@@ -1,5 +1,7 @@
 import { Request, Response } from "express";
 import prisma  from "../utils/prisma";
+import { ProformaStatus } from "@prisma/client";
+
 
 export const createProformaInvoice = async (req: Request, res: Response) => {
   try {
@@ -7,7 +9,9 @@ export const createProformaInvoice = async (req: Request, res: Response) => {
       customerName,
       customerPhone,
       quotationId,
-      items
+      items,
+      discountAmount = 0,
+      taxAmount = 0
     } = req.body;
 
     if (!customerName || !items || items.length === 0) {
@@ -19,67 +23,67 @@ export const createProformaInvoice = async (req: Request, res: Response) => {
       0
     );
 
-    const taxAmount = items.reduce(
-      (sum: number, item: any) => sum + item.taxAmount,
-      0
-    );
+    const grandTotal = subTotal - discountAmount + taxAmount;
 
-    const grandTotal = subTotal + taxAmount;
     const proforma = await prisma.proformaInvoice.create({
-  data: {
-    proformaNumber: `PI-${Date.now()}`,
-    customerName,
-    customerPhone,
-    quotationId,
-    subTotal,
-    taxAmount,
-    discountAmount: 0,   // ✅ FIX (IMPORTANT)
-    grandTotal,
-    items: {
-      create: items.map((item: any) => ({
-        productName: item.productName,
-        quantity: item.quantity,
-        rate: item.rate,
-        taxPercent: item.taxPercent,
-        taxAmount: item.taxAmount,
-        total: item.total
-      }))
-    }
-  },
-  include: {
-    items: true
-  }
-});
+      data: {
+        proformaNumber: `PI-${Date.now()}`,
+        customerName,
+        customerPhone,
+        quotationId: quotationId ? String(quotationId) : null, // ✅ optional linkage
+        subTotal,
+        discountAmount,
+        taxAmount,
+        grandTotal,
+        status: ProformaStatus.DRAFT, // ✅ default status
+        items: {
+        create: items.map((item: any) => ({
+         productName: item.productName,
+         quantity: item.quantity,
+         rate: item.rate,              // ✅ REQUIRED
+         taxPercent: item.taxPercent ?? 0,
+         taxAmount: item.taxAmount ?? 0,
+         total: item.total
 
-   
-
-    res.status(201).json({
-      success: true,
-      message: "Proforma invoice created successfully",
-      data: proforma
+          }))
+        }
+      },
+      include: {
+        items: true
+      }
     });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Server error" });
+
+    // ✅ Task-style response (no wrapper)
+    res.status(201).json(proforma);
+
+  } catch (error: any) {
+    console.error("PROFORMA ERROR:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
 
 export const getProformaInvoices = async (_req: Request, res: Response) => {
   try {
     const proformas = await prisma.proformaInvoice.findMany({
-      include: {
-        items: true
+      select: {
+        id: true,
+        proformaNumber: true,
+        customerName: true,
+        grandTotal: true,
+        status: true,
+        createdAt: true
       },
       orderBy: {
         createdAt: "desc"
       }
     });
 
-    res.json({
-      success: true,
-      data: proformas
-    });
+    // ✅ Task-style list response
+    res.json(proformas);
+
   } catch (error) {
     res.status(500).json({ message: "Server error" });
   }
 };
+
