@@ -12,10 +12,11 @@ export const createSalesReturn = async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Invalid request data" });
     }
 
-    let totalAmount = 0;
-    for (const item of items) {
-      totalAmount += item.quantity * item.price;
-    }
+    // Calculate total return amount
+    const totalAmount = items.reduce(
+      (sum: number, item: any) => sum + item.quantity * item.price,
+      0
+    );
 
     const salesReturn = await prisma.$transaction(async (tx) => {
 
@@ -47,26 +48,17 @@ export const createSalesReturn = async (req: Request, res: Response) => {
         });
       }
 
-      // 3️⃣ Credit Party Ledger
+      // 3️⃣ Party Ledger Entry (CREDIT)
       await tx.partyLedger.create({
         data: {
           partyId,
-          credit: totalAmount,
-          debit: 0,
-          description: `Sales return for invoice #${invoiceId}`,
+          type: "CREDIT",
+          amount: totalAmount,
+          reference: `Sales return for invoice #${invoiceId}`,
         },
       });
 
-      // 4️⃣ Adjust Invoice Balance
-      await tx.invoice.update({
-        where: { id: invoiceId },
-        data: {
-          balanceAmount: {
-            decrement: totalAmount,
-          },
-        },
-      });
-
+      // ❌ NO invoice balance update (ledger-based system)
       return sr;
     });
 

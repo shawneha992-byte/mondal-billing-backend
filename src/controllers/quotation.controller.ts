@@ -55,11 +55,20 @@ export const createQuotation = async (req: Request, res: Response) => {
  */
 export const getAllQuotations = async (_req: Request, res: Response) => {
   const quotations = await prisma.quotation.findMany({
-    include: { items: true },
+    select: {
+      id: true,
+      partyId: true,
+      date: true,
+      validTill: true,
+      total: true,
+      status: true,
+    },
     orderBy: { createdAt: "desc" },
   });
+
   res.json(quotations);
 };
+
 
 /**
  * GET /api/quotations/:id
@@ -76,7 +85,15 @@ export const getQuotationById = async (req: Request, res: Response) => {
 
     const quotation = await prisma.quotation.findUnique({
       where: { id },
-      include: { items: true }
+      include: {
+        items: {
+          include: {
+            product: {
+              select: { name: true }
+            }
+          }
+        }
+      }
     });
 
     if (!quotation) {
@@ -85,15 +102,12 @@ export const getQuotationById = async (req: Request, res: Response) => {
       });
     }
 
-    res.json({
-      success: true,
-      data: quotation
-    });
+    res.json(quotation);
   } catch (error: any) {
-    console.error("❌ GET QUOTATION ERROR:", error);
     res.status(500).json({
       message: "Server error",
       error: error.message
     });
   }
 };
+
