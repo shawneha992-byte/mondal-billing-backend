@@ -1,6 +1,13 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import routes from "./routes"; // ✅ only this import
+
+import routes from "./routes"; // index routes
+import partyLedgerRoutes from "./routes/partyLedger.routes";
+import partyRoutes from "./routes/party.routes";
+import paymentInRoutes from "./routes/paymentIn.routes";
+import invoiceRoutes from "./routes/invoice.routes";
+import salesRoutes from "./routes/salesReturn.routes";
 
 const app = express();
 
@@ -31,8 +38,13 @@ app.get("/health", (_req, res) => {
 });
 
 /**
- * ✅ Register ALL routes from index.ts
+ * ✅ Register ALL routes
  */
-app.use(routes);
+app.use(routes); // from routes/index.ts
+app.use("/api", partyLedgerRoutes);
+app.use("/api", partyRoutes);
+app.use("/api/payment-in", paymentInRoutes);
+app.use("/api/invoices", invoiceRoutes);
+app.use("/api/salesReturn", salesRoutes);
 
 export default app;
