@@ -3,8 +3,20 @@ dotenv.config();
 
 import app from "./app";
 
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
+const HOST = process.env.HOST || "127.0.0.1";
 
-app.listen(PORT, () => {
-  console.log(`Backend running on port ${PORT}`);
+console.log("DATABASE_URL =", process.env.DATABASE_URL);
+
+const server = app.listen(PORT, HOST, () => {
+  console.log(`✅ Backend running at http://${HOST}:${PORT}`);
+});
+
+// Graceful shutdown (optional but professional)
+process.on("SIGTERM", () => {
+  console.log("🛑 Server shutting down...");
+  server.close(() => {
+    console.log("✅ Server closed");
+    process.exit(0);
+  });
 });
