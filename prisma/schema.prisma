@@ -78,15 +78,6 @@ model Branch {
 }
 
 model User {
-  name      String
-  email     String?  @unique
-  password  String
-  role      String
-  createdAt DateTime @default(now())
-  branch    String
-  isActive  Boolean  @default(true)
-  mobile    String?  @unique
-  id        Int      @id @default(autoincrement())
   id   Int    @id @default(autoincrement())
   name String
 
@@ -159,37 +150,17 @@ model Party {
 }
 
 model Product {
-  id               Int               @id @default(autoincrement())
-  name             String
-  stock            Int
-  price            Float
-  createdAt        DateTime          @default(now())
-  invoiceItems     InvoiceItem[]
-  quotationItems   QuotationItem[]
+  id           Int           @id @default(autoincrement())
+  name         String
+  stock        Int
+  price        Float
+  invoiceItems InvoiceItem[]
+  createdAt    DateTime      @default(now())
+
   salesReturnItems SalesReturnItem[]
+  quotationItems   QuotationItem[]
 }
 
-model Invoice {
-  id            Int           @id @default(autoincrement())
-  partyId       Int
-  totalAmount   Float
-  createdAt     DateTime      @default(now())
-  invoiceNumber String        @unique
-  subTotal      Float
-  taxAmount     Float
-  party         Party         @relation(fields: [partyId], references: [id])
-  items         InvoiceItem[]
-  salesReturns  SalesReturn[]
-}
-
-model PartyLedger {
-  id        Int        @id @default(autoincrement())
-  partyId   Int
-  createdAt DateTime   @default(now())
-  amount    Float
-  reference String
-  type      LedgerType
-  party     Party      @relation(fields: [partyId], references: [id])
 model PartyLedger {
   id Int @id @default(autoincrement())
 
@@ -298,24 +269,26 @@ model PartyAddress {
 }
 
 model SalesReturn {
-  id          Int               @id @default(autoincrement())
+  id          Int      @id @default(autoincrement())
   invoiceId   Int
   partyId     Int
   totalAmount Float
-  createdAt   DateTime          @default(now())
-  invoice     Invoice           @relation(fields: [invoiceId], references: [id])
-  party       Party             @relation(fields: [partyId], references: [id])
-  items       SalesReturnItem[]
+  createdAt   DateTime @default(now())
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id])
+  party       Party    @relation(fields: [partyId], references: [id])
+
+  items SalesReturnItem[]
 }
 
 model SalesReturnItem {
-  id            Int         @id @default(autoincrement())
+  id            Int   @id @default(autoincrement())
   salesReturnId Int
   productId     Int
   quantity      Int
   price         Float
-  product       Product     @relation(fields: [productId], references: [id])
-  salesReturn   SalesReturn @relation(fields: [salesReturnId], references: [id])
+
+  salesReturn SalesReturn @relation(fields: [salesReturnId], references: [id])
+  product     Product     @relation(fields: [productId], references: [id])
 }
 
 model Quotation {
@@ -328,87 +301,25 @@ model Quotation {
   tax       Float
   total     Float
   status    QuotationStatus @default(OPEN)
-  createdAt DateTime        @default(now())
-  updatedAt DateTime        @updatedAt
-  items     QuotationItem[]
+
+  items QuotationItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model QuotationItem {
-  id          Int       @id @default(autoincrement())
+  id          Int     @id @default(autoincrement())
   quotationId Int
   productId   Int
   quantity    Int
   price       Float
   total       Float
-  product     Product   @relation(fields: [productId], references: [id])
-  quotation   Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  product     Product @relation(fields: [productId], references: [id])
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
 }
 
-model ProformaInvoice {
-  id             String                @id @default(uuid())
-  proformaNumber String                @unique
-  date           DateTime              @default(now())
-  customerName   String
-  customerPhone  String?
-  quotationId    String?
-  subTotal       Float
-  taxAmount      Float
-  discountAmount Float                 @default(0)
-  grandTotal     Float
-  status         ProformaStatus        @default(DRAFT)
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
-  items          ProformaInvoiceItem[]
-}
-
-model ProformaInvoiceItem {
-  id                String          @id @default(uuid())
-  proformaInvoiceId String
-  productName       String
-  quantity          Int
-  rate              Float
-  taxPercent        Float
-  taxAmount         Float
-  total             Float
-  proformaInvoice   ProformaInvoice @relation(fields: [proformaInvoiceId], references: [id], onDelete: Cascade)
-}
-
-model Party {
-  id           Int           @id @default(autoincrement())
-  name         String
-  phone        String?
-  createdAt    DateTime      @default(now())
-  invoices     Invoice[]
-  ledgers      PartyLedger[]
-  salesReturns SalesReturn[]
-}
-
-model InvoiceItem {
-  id        Int     @id @default(autoincrement())
-  invoiceId Int
-  productId Int
-  quantity  Int
-  price     Float
-  total     Float
-  invoice   Invoice @relation(fields: [invoiceId], references: [id])
-  product   Product @relation(fields: [productId], references: [id])
-}
-
-enum LedgerType {
-  DEBIT
-  CREDIT
-}
-
-enum QuotationStatus {
-  OPEN
-  CONVERTED
-  CANCELLED
-}
-
-enum ProformaStatus {
-  DRAFT
-  SENT
-  CANCELLED
 model ProformaInvoice {
   id             String   @id @default(uuid())
   proformaNumber String   @unique
