@@ -17,7 +17,7 @@ export const login = async (req: Request, res: Response) => {
     return res.status(401).json({ message: "Invalid credentials" });
   }
 
-  const passwordMatch = await bcrypt.compare(password, user.password);
+  const passwordMatch = await bcrypt.compare(password, user.password_hash);
 
   if (!passwordMatch) {
     return res.status(401).json({ message: "Invalid credentials" });
@@ -31,13 +31,13 @@ export const login = async (req: Request, res: Response) => {
     return res.status(403).json({ message: "Wrong role" });
   }
 
-  if (user.branch !== branch) {
+  if (user.branch_code !== branch) {
     return res.status(403).json({ message: "Wrong branch" });
   }
 
 
   const token = jwt.sign(
-    { id: user.id, role: user.role, branch: user.branch },
+    { id: user.id, role: user.role, branch: user.branch_code },
     process.env.JWT_SECRET!,
     { expiresIn: "1d" }
   );
@@ -48,7 +48,7 @@ export const login = async (req: Request, res: Response) => {
       id: user.id,
       name: user.name,
       role: user.role,
-      branch: user.branch,
+      branch: user.branch_code,
     },
   });
 };

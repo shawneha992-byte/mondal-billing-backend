@@ -1,6 +1,9 @@
 import { Request, Response } from "express";
 import prisma from "../utils/prisma";
 
+/**
+ * CREATE INVOICE
+ */
 export const createInvoice = async (req: Request, res: Response) => {
   const { partyId, items } = req.body;
 
@@ -33,14 +36,21 @@ export const createInvoice = async (req: Request, res: Response) => {
       const taxAmount = subTotal * 0.18;
       const totalAmount = subTotal + taxAmount;
 
-      // 3️⃣ Create invoice
+      // 3️⃣ Create invoice (schema aligned)
       const invoice = await tx.invoice.create({
         data: {
-          invoiceNumber: `INV-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          invoiceNo: `INV-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+
+          // relation (unchecked create)
           partyId,
+
           subTotal,
           taxAmount,
           totalAmount,
+
+          // REQUIRED by schema
+          outstandingAmount: totalAmount,
+
           items: {
             create: items.map((item: any) => ({
               productId: item.productId,
@@ -64,29 +74,42 @@ export const createInvoice = async (req: Request, res: Response) => {
         });
       }
 
-      // 5️⃣ Party Ledger (DEBIT)
+      // 5️⃣ Party Ledger (DEBIT entry)
       await tx.partyLedger.create({
         data: {
           partyId,
+
+          // REQUIRED reference fields
+          refType: "Invoice",
+          refId: invoice.id,
+          reference: invoice.invoiceNo,
+
+          // Accounting
           type: "DEBIT",
-          amount: totalAmount,
-          reference: invoice.invoiceNumber,
+          debit: totalAmount,
+          credit: 0,
+
+          // REQUIRED balance
+          balance: totalAmount,
         },
       });
 
       return invoice;
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       message: "Invoice created successfully",
       invoice,
     });
   } catch (error: any) {
     console.error("Create invoice error:", error);
-    res.status(400).json({ error: error.message });
+    return res.status(400).json({ error: error.message });
   }
 };
 
+/**
+ * GET ALL INVOICES
+ */
 export const getInvoices = async (_req: Request, res: Response) => {
   try {
     const invoices = await prisma.invoice.findMany({
@@ -103,9 +126,9 @@ export const getInvoices = async (_req: Request, res: Response) => {
       },
     });
 
-    res.json(invoices);
+    return res.json(invoices);
   } catch (error) {
     console.error("Fetch invoices error:", error);
-    res.status(500).json({ message: "Failed to fetch invoices" });
+    return res.status(500).json({ message: "Failed to fetch invoices" });
   }
 };

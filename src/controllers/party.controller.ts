@@ -1,8 +1,8 @@
 import { Request, Response } from "express";
 import prisma from "../utils/prisma";
-import { validateGST, validatePAN } from "../utils/gstPanValidator.ts";
+import { validateGST, validatePAN } from "../utils/gstPanValidator";
 import { fetchGSTDetails } from "../services/gstService";
-import { BalanceType, LedgerRefType } from "@prisma/client";
+import { BalanceType, LedgerRefType, LedgerType } from "@prisma/client";
 
 /**
  * ======================================================
@@ -72,10 +72,12 @@ export const createParty = async (req: Request, res: Response) => {
       }
     }
 
-    // ✅ Create Party
+    // ✅ Create Party (SCHEMA ALIGNED)
     const party = await prisma.party.create({
       data: {
+        name: gstData?.legal_name || partyName,     // ✅ REQUIRED
         partyName: gstData?.legal_name || partyName,
+
         mobile,
         email,
         gstin,
@@ -95,19 +97,23 @@ export const createParty = async (req: Request, res: Response) => {
     if (openingBalance && openingBalance > 0) {
       let debit: number | null = null;
       let credit: number | null = null;
+      let type: LedgerType;
 
       if (openingBalanceType === BalanceType.ToCollect) {
         debit = openingBalance;
-      }
-
-      if (openingBalanceType === BalanceType.ToPay) {
+        type = LedgerType.DEBIT;
+      } else {
         credit = openingBalance;
+        type = LedgerType.CREDIT;
       }
 
       await prisma.partyLedger.create({
         data: {
           partyId: party.id,
+
           refType: LedgerRefType.Opening,
+          type,                                // ✅ REQUIRED
+
           debit,
           credit,
           balance: openingBalance
@@ -134,7 +140,6 @@ export const createParty = async (req: Request, res: Response) => {
  * ======================================================
  * UPDATE PARTY
  * PUT /api/parties/:id
- * (Opening balance is NOT editable)
  * ======================================================
  */
 export const updateParty = async (req: Request, res: Response) => {
@@ -192,7 +197,9 @@ export const updateParty = async (req: Request, res: Response) => {
     const party = await prisma.party.update({
       where: { id: partyId },
       data: {
+        name: gstData?.legal_name || partyName,   // ✅ REQUIRED
         partyName: gstData?.legal_name || partyName,
+
         mobile,
         email,
         gstin,
@@ -223,7 +230,6 @@ export const updateParty = async (req: Request, res: Response) => {
 /**
  * ======================================================
  * GET ALL PARTIES
- * GET /api/parties
  * ======================================================
  */
 export const getAllParties = async (_req: Request, res: Response) => {
@@ -249,7 +255,6 @@ export const getAllParties = async (_req: Request, res: Response) => {
 /**
  * ======================================================
  * GET PARTY BY ID
- * GET /api/parties/:id
  * ======================================================
  */
 export const getPartyById = async (req: Request, res: Response) => {

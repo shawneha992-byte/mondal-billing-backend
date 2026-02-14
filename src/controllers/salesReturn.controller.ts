@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import prisma from "../utils/prisma";
-import { InvoiceStatus } from "@prisma/client";
+import { InvoiceStatus, LedgerRefType, LedgerType } from "@prisma/client";
 
 /**
  * ======================================================
@@ -10,22 +10,41 @@ import { InvoiceStatus } from "@prisma/client";
  */
 export const createSalesReturn = async (req: Request, res: Response) => {
   try {
-    const { invoiceId, returnAmount } = req.body;
+    const { invoiceId, partyId, items } = req.body;
 
     if (!invoiceId || !partyId || !items || items.length === 0) {
-      return res.status(400).json({ message: "Invalid request data" });
+      return res.status(400).json({
+        success: false,
+        message: "invoiceId, partyId and items are required"
+      });
     }
 
-    // Calculate total return amount
+    // 🔹 Calculate total return amount from items
     const totalAmount = items.reduce(
       (sum: number, item: any) => sum + item.quantity * item.price,
       0
     );
 
-    const salesReturn = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
 
-      // 1️⃣ Create Sales Return
-      const sr = await tx.salesReturn.create({
+      // 1️⃣ Fetch invoice
+      const invoice = await tx.invoice.findUnique({
+        where: { id: Number(invoiceId) }
+      });
+
+      if (!invoice) {
+        throw new Error("Invoice not found");
+      }
+
+      const outstanding = Number(invoice.outstandingAmount ?? 0);
+
+      // 2️⃣ Validate return amount
+      if (totalAmount > outstanding) {
+        throw new Error("Return amount cannot exceed outstanding amount");
+      }
+
+      // 3️⃣ Create Sales Return
+      const salesReturn = await tx.salesReturn.create({
         data: {
           invoiceId,
           partyId,
@@ -34,102 +53,70 @@ export const createSalesReturn = async (req: Request, res: Response) => {
             create: items.map((item: any) => ({
               productId: item.productId,
               quantity: item.quantity,
-              price: item.price,
-            })),
-          },
-        },
-    /* if (!invoiceId || !returnAmount || returnAmount <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "invoiceId and valid returnAmount are required"
+              price: item.price
+            }))
+          }
+        }
       });
-    } */
 
-    // 1️⃣ Fetch invoice
-    const invoice = await prisma.invoice.findUnique({
-      where: { id: Number(invoiceId) }
-    });
+      // 4️⃣ Calculate new outstanding & status
+      const newOutstanding = outstanding - totalAmount;
 
-    if (!invoice) {
-      return res.status(404).json({
-        success: false,
-        message: "Invoice not found"
-      });
-    }
-
-    const outstanding = Number(invoice.outstandingAmount ?? 0);
-
-    // 2️⃣ Validate return amount
-    if (returnAmount > outstanding) {
-      return res.status(400).json({
-        success: false,
-        message: "Return amount cannot exceed outstanding amount"
-      });
-    }
-
-    // 3️⃣ Calculate new outstanding
-    const newOutstanding = outstanding - returnAmount;
-
-    let newStatus: InvoiceStatus = InvoiceStatus.OPEN;
-    if (newOutstanding === 0) newStatus = InvoiceStatus.PAID;
-    else if (newOutstanding < Number(invoice.totalAmount))
-      newStatus = InvoiceStatus.PARTIAL;
-
-    // 4️⃣ Update invoice
-    await prisma.invoice.update({
-      where: { id: invoice.id },
-      data: {
-        outstandingAmount: newOutstanding,
-        status: newStatus
+      let newStatus: InvoiceStatus = InvoiceStatus.OPEN;
+      if (newOutstanding === 0) {
+        newStatus = InvoiceStatus.PAID;
+      } else if (newOutstanding < Number(invoice.totalAmount)) {
+        newStatus = InvoiceStatus.PARTIAL;
       }
 
-      // 3️⃣ Party Ledger Entry (CREDIT)
+      // 5️⃣ Update invoice
+      await tx.invoice.update({
+        where: { id: invoice.id },
+        data: {
+          outstandingAmount: newOutstanding,
+          status: newStatus
+        }
+      });
+
+      // 6️⃣ Get last ledger balance
+      const lastLedger = await tx.partyLedger.findFirst({
+        where: { partyId },
+        orderBy: { id: "desc" }
+      });
+
+      const lastBalance = Number(lastLedger?.balance ?? 0);
+      const newBalance = lastBalance - totalAmount;
+
+      // 7️⃣ Party Ledger entry (CREDIT)
       await tx.partyLedger.create({
         data: {
           partyId,
-          type: "CREDIT",
-          amount: totalAmount,
-          reference: `Sales return for invoice #${invoiceId}`,
-        },
+
+          refType: LedgerRefType.Return,
+          refId: invoice.id,
+
+          type: LedgerType.CREDIT,
+          debit: null,
+          credit: totalAmount,
+
+          balance: newBalance
+        }
       });
 
-      // ❌ NO invoice balance update (ledger-based system)
-      return sr;
-    });
-
-    // 5️⃣ Get last ledger balance
-    const lastLedger = await prisma.partyLedger.findFirst({
-      where: { partyId: invoice.partyId },
-      orderBy: { id: "desc" }
-    });
-
-    const lastBalance = Number(lastLedger?.balance ?? 0);
-    const newBalance = lastBalance - returnAmount;
-
-    // 6️⃣ Create ledger CREDIT entry
-    await prisma.partyLedger.create({
-      data: {
-        partyId: invoice.partyId,
-        refType: "Return",
-        refId: invoice.id,
-
-        type: "CREDIT",
-        debit: null,
-        credit: returnAmount,
-        balance: newBalance
-      }
+      return salesReturn;
     });
 
     return res.status(201).json({
       success: true,
-      message: "Sales return processed successfully"
+      message: "Sales return processed successfully",
+      data: result
     });
 
-  } catch (error) {
+  } catch (error: any) {
     console.error("❌ Sales Return Error:", error);
     return res.status(500).json({
       success: false,
-      message: "Failed to process sales return"
+      message: error.message || "Failed to process sales return"
     });
   }
 };
