@@ -7,10 +7,260 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model Branch {
+  id          Int     @id @default(autoincrement())
+  branch_name String
+  branch_code String  @unique
+  address     String?
+  status      Status  @default(active)
+  users       User[]
+}
+
+model User {
+  id            Int           @id @default(autoincrement())
+  name          String
+  email         String?       @unique
+  mobile        String?       @unique
+  password_hash String
+  role          Role
+  branch_code   String?
+  isActive      Boolean       @default(true)
+  status        Status        @default(active)
+  created_at    DateTime      @default(now())
+  createdAt     DateTime      @default(now())
+  branch        Branch?       @relation(fields: [branch_code], references: [branch_code])
+  sessions      UserSession[]
+}
+
+model UserSession {
+  id         Int      @id @default(autoincrement())
+  token      String
+  last_login DateTime @default(now())
+  device     String?
+  user_id    Int
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+model Party {
+  id                 Int            @id @default(autoincrement())
+  name               String
+  partyName          String
+  phone              String?
+  mobile             String?
+  email              String?
+  gstin              String?
+  pan                String?
+  partyType          PartyType
+  category           String?
+  billingAddress     String?
+  shippingAddress    String?
+  creditPeriod       Int?
+  creditLimit        Decimal?       @db.Decimal(12, 2)
+  openingBalance     Decimal?       @db.Decimal(12, 2)
+  openingBalanceType BalanceType?
+  status             Status         @default(active)
+  createdAt          DateTime       @default(now())
+  created_at         DateTime       @default(now())
+  invoices           Invoice[]
+  addresses          PartyAddress[]
+  contacts           PartyContact[]
+  ledgerEntries      PartyLedger[]
+  paymentsIn         PaymentIn[]
+  salesReturns       SalesReturn[]
+}
+
+model Product {
+  id               Int               @id @default(autoincrement())
+  name             String
+  stock            Int
+  price            Float
+  createdAt        DateTime          @default(now())
+  invoiceItems     InvoiceItem[]
+  quotationItems   QuotationItem[]
+  salesReturnItems SalesReturnItem[]
+}
+
+model PartyLedger {
+  id         Int           @id @default(autoincrement())
+  partyId    Int
+  date       DateTime      @default(now())
+  createdAt  DateTime      @default(now())
+  created_at DateTime      @default(now())
+  refType    LedgerRefType
+  refId      Int?
+  reference  String?
+  type       LedgerType
+  amount     Float?
+  debit      Decimal?      @db.Decimal(12, 2)
+  credit     Decimal?      @db.Decimal(12, 2)
+  balance    Decimal       @db.Decimal(12, 2)
+  party      Party         @relation(fields: [partyId], references: [id], onDelete: Cascade)
+}
+
+model PaymentIn {
+  id          Int                 @id @default(autoincrement())
+  paymentNo   String              @unique
+  partyId     Int
+  date        DateTime
+  mode        PaymentMode
+  amount      Decimal             @db.Decimal(12, 2)
+  notes       String?
+  created_at  DateTime            @default(now())
+  allocations PaymentAllocation[]
+  party       Party               @relation(fields: [partyId], references: [id])
+
+  @@index([partyId])
+  @@index([date])
+}
+
+model PaymentAllocation {
+  id        Int       @id @default(autoincrement())
+  paymentId Int
+  invoiceId Int
+  amount    Decimal   @db.Decimal(12, 2)
+  invoice   Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  payment   PaymentIn @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+}
+
+model Invoice {
+  id                Int                 @id @default(autoincrement())
+  invoiceNo         String              @unique
+  partyId           Int
+  subTotal          Decimal?            @db.Decimal(12, 2)
+  taxAmount         Decimal?            @db.Decimal(12, 2)
+  totalAmount       Decimal             @db.Decimal(12, 2)
+  outstandingAmount Decimal             @db.Decimal(12, 2)
+  status            InvoiceStatus       @default(OPEN)
+  createdAt         DateTime            @default(now())
+  created_at        DateTime            @default(now())
+  party             Party               @relation(fields: [partyId], references: [id])
+  items             InvoiceItem[]
+  allocations       PaymentAllocation[]
+  salesReturns      SalesReturn[]
+}
+
+model PartyContact {
+  id         Int      @id @default(autoincrement())
+  partyId    Int
+  name       String
+  mobile     String
+  email      String?
+  isPrimary  Boolean  @default(false)
+  created_at DateTime @default(now())
+  party      Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
+
+  @@index([partyId])
+}
+
+model PartyAddress {
+  id          Int      @id @default(autoincrement())
+  partyId     Int
+  addressType String
+  addressLine String
+  city        String
+  state       String
+  pincode     String
+  country     String   @default("India")
+  isDefault   Boolean  @default(false)
+  created_at  DateTime @default(now())
+  party       Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
+
+  @@index([partyId])
+}
+
+model SalesReturn {
+  id          Int               @id @default(autoincrement())
+  invoiceId   Int
+  partyId     Int
+  totalAmount Float
+  createdAt   DateTime          @default(now())
+  invoice     Invoice           @relation(fields: [invoiceId], references: [id])
+  party       Party             @relation(fields: [partyId], references: [id])
+  items       SalesReturnItem[]
+}
+
+model SalesReturnItem {
+  id            Int         @id @default(autoincrement())
+  salesReturnId Int
+  productId     Int
+  quantity      Int
+  price         Float
+  product       Product     @relation(fields: [productId], references: [id])
+  salesReturn   SalesReturn @relation(fields: [salesReturnId], references: [id])
+}
+
+model Quotation {
+  id        Int             @id @default(autoincrement())
+  partyId   Int
+  date      DateTime
+  validTill DateTime
+  subtotal  Float
+  discount  Float
+  tax       Float
+  total     Float
+  status    QuotationStatus @default(OPEN)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  items     QuotationItem[]
+}
+
+model QuotationItem {
+  id          Int       @id @default(autoincrement())
+  quotationId Int
+  productId   Int
+  quantity    Int
+  price       Float
+  total       Float
+  product     Product   @relation(fields: [productId], references: [id])
+  quotation   Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+}
+
+model ProformaInvoice {
+  id             String                @id @default(uuid())
+  proformaNumber String                @unique
+  date           DateTime              @default(now())
+  customerName   String
+  customerPhone  String?
+  quotationId    String?
+  subTotal       Float
+  taxAmount      Float
+  discountAmount Float                 @default(0)
+  grandTotal     Float
+  status         ProformaStatus        @default(DRAFT)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  items          ProformaInvoiceItem[]
+}
+
+model ProformaInvoiceItem {
+  id                String          @id @default(uuid())
+  proformaInvoiceId String
+  productName       String
+  quantity          Int
+  rate              Float
+  taxPercent        Float
+  taxAmount         Float
+  total             Float
+  proformaInvoice   ProformaInvoice @relation(fields: [proformaInvoiceId], references: [id], onDelete: Cascade)
+}
+
+model InvoiceItem {
+  id        Int     @id @default(autoincrement())
+  invoiceId Int
+  productId Int
+  quantity  Int
+  price     Float
+  total     Float
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+  product   Product @relation(fields: [productId], references: [id])
+}
+
 enum Role {
-  admin
-  cashier
-  accountant
+  Admin
+  Cashier
+  Accountant
 }
 
 enum Status {
@@ -65,306 +315,4 @@ enum ProformaStatus {
   DRAFT
   SENT
   CANCELLED
-}
-
-model Branch {
-  id          Int     @id @default(autoincrement())
-  branch_name String
-  branch_code String  @unique
-  address     String?
-  status      Status  @default(active)
-
-  users User[]
-}
-
-model User {
-  id   Int    @id @default(autoincrement())
-  name String
-
-  email  String? @unique
-  mobile String? @unique
-
-  password_hash String
-
-  role        Role // admin, cashier, accountant (enum-based)
-  branch_code String?
-  branch      Branch? @relation(fields: [branch_code], references: [branch_code])
-
-  isActive Boolean @default(true)
-  status   Status  @default(active)
-
-  created_at DateTime @default(now())
-  createdAt  DateTime @default(now())
-
-  sessions UserSession[]
-}
-
-model UserSession {
-  id         Int      @id @default(autoincrement())
-  token      String
-  last_login DateTime @default(now())
-  device     String?
-
-  user    User @relation(fields: [user_id], references: [id], onDelete: Cascade)
-  user_id Int
-}
-
-model Party {
-  id Int @id @default(autoincrement())
-
-  // 🔹 Identity
-  name      String
-  partyName String
-
-  // 🔹 Contact
-  phone  String?
-  mobile String?
-  email  String?
-
-  // 🔹 Business / Tax
-  gstin     String?
-  pan       String?
-  partyType PartyType
-  category  String?
-
-  // 🔹 Addresses
-  billingAddress  String?
-  shippingAddress String?
-
-  // 🔹 Credit & Balance
-  creditPeriod       Int?
-  creditLimit        Decimal?     @db.Decimal(12, 2)
-  openingBalance     Decimal?     @db.Decimal(12, 2)
-  openingBalanceType BalanceType?
-
-  status     Status   @default(active)
-  createdAt  DateTime @default(now())
-  created_at DateTime @default(now())
-
-  invoices      Invoice[]
-  ledgerEntries PartyLedger[]
-  paymentsIn    PaymentIn[]
-  salesReturns  SalesReturn[]
-  contacts      PartyContact[]
-  addresses     PartyAddress[]
-}
-
-model Product {
-  id           Int           @id @default(autoincrement())
-  name         String
-  stock        Int
-  price        Float
-  invoiceItems InvoiceItem[]
-  createdAt    DateTime      @default(now())
-
-  salesReturnItems SalesReturnItem[]
-  quotationItems   QuotationItem[]
-}
-
-model PartyLedger {
-  id Int @id @default(autoincrement())
-
-  // 🔹 Party relation
-  partyId Int
-  party   Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
-
-  // 🔹 Date & timestamps
-  date       DateTime @default(now())
-  createdAt  DateTime @default(now())
-  created_at DateTime @default(now())
-
-  // 🔹 Reference info
-  refType   LedgerRefType
-  refId     Int?
-  reference String?
-
-  // 🔹 Accounting
-  type    LedgerType // DEBIT / CREDIT
-  amount  Float?
-  debit   Decimal?   @db.Decimal(12, 2)
-  credit  Decimal?   @db.Decimal(12, 2)
-  balance Decimal    @db.Decimal(12, 2)
-}
-
-model PaymentIn {
-  id         Int         @id @default(autoincrement())
-  paymentNo  String      @unique
-  partyId    Int
-  date       DateTime
-  mode       PaymentMode
-  amount     Decimal     @db.Decimal(12, 2)
-  notes      String?
-  created_at DateTime    @default(now())
-
-  party       Party               @relation(fields: [partyId], references: [id])
-  allocations PaymentAllocation[]
-
-  @@index([partyId])
-  @@index([date])
-}
-
-model PaymentAllocation {
-  id        Int     @id @default(autoincrement())
-  paymentId Int
-  invoiceId Int
-  amount    Decimal @db.Decimal(12, 2)
-
-  payment PaymentIn @relation(fields: [paymentId], references: [id], onDelete: Cascade)
-  invoice Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-
-  @@index([invoiceId])
-}
-
-model Invoice {
-  id        Int    @id @default(autoincrement())
-  invoiceNo String @unique
-
-  partyId Int
-  party   Party @relation(fields: [partyId], references: [id])
-
-  subTotal    Decimal? @db.Decimal(12, 2)
-  taxAmount   Decimal? @db.Decimal(12, 2)
-  totalAmount Decimal  @db.Decimal(12, 2)
-
-  outstandingAmount Decimal       @db.Decimal(12, 2)
-  status            InvoiceStatus @default(OPEN)
-
-  createdAt  DateTime @default(now())
-  created_at DateTime @default(now())
-
-  items        InvoiceItem[]
-  allocations  PaymentAllocation[]
-  salesReturns SalesReturn[]
-}
-
-model PartyContact {
-  id         Int      @id @default(autoincrement())
-  partyId    Int
-  name       String
-  mobile     String
-  email      String?
-  isPrimary  Boolean  @default(false)
-  created_at DateTime @default(now())
-
-  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
-
-  @@index([partyId])
-}
-
-model PartyAddress {
-  id          Int      @id @default(autoincrement())
-  partyId     Int
-  addressType String
-  addressLine String
-  city        String
-  state       String
-  pincode     String
-  country     String   @default("India")
-  isDefault   Boolean  @default(false)
-  created_at  DateTime @default(now())
-
-  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
-
-  @@index([partyId])
-}
-
-model SalesReturn {
-  id          Int      @id @default(autoincrement())
-  invoiceId   Int
-  partyId     Int
-  totalAmount Float
-  createdAt   DateTime @default(now())
-  invoice     Invoice  @relation(fields: [invoiceId], references: [id])
-  party       Party    @relation(fields: [partyId], references: [id])
-
-  items SalesReturnItem[]
-}
-
-model SalesReturnItem {
-  id            Int   @id @default(autoincrement())
-  salesReturnId Int
-  productId     Int
-  quantity      Int
-  price         Float
-
-  salesReturn SalesReturn @relation(fields: [salesReturnId], references: [id])
-  product     Product     @relation(fields: [productId], references: [id])
-}
-
-model Quotation {
-  id        Int             @id @default(autoincrement())
-  partyId   Int
-  date      DateTime
-  validTill DateTime
-  subtotal  Float
-  discount  Float
-  tax       Float
-  total     Float
-  status    QuotationStatus @default(OPEN)
-
-  items QuotationItem[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model QuotationItem {
-  id          Int     @id @default(autoincrement())
-  quotationId Int
-  productId   Int
-  quantity    Int
-  price       Float
-  total       Float
-  product     Product @relation(fields: [productId], references: [id])
-
-  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
-}
-
-model ProformaInvoice {
-  id             String   @id @default(uuid())
-  proformaNumber String   @unique
-  date           DateTime @default(now())
-
-  customerName  String
-  customerPhone String?
-
-  quotationId String? // optional link to quotation
-
-  subTotal       Float
-  taxAmount      Float
-  discountAmount Float @default(0)
-  grandTotal     Float
-
-  status ProformaStatus @default(DRAFT)
-
-  items ProformaInvoiceItem[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model ProformaInvoiceItem {
-  id                String @id @default(uuid())
-  proformaInvoiceId String
-
-  productName String
-  quantity    Int
-  rate        Float
-  taxPercent  Float
-  taxAmount   Float
-  total       Float
-
-  proformaInvoice ProformaInvoice @relation(fields: [proformaInvoiceId], references: [id], onDelete: Cascade)
-}
-
-model InvoiceItem {
-  id        Int   @id @default(autoincrement())
-  invoiceId Int
-  productId Int
-  quantity  Int
-  price     Float
-  total     Float
-
-  invoice Invoice @relation(fields: [invoiceId], references: [id])
-  product Product @relation(fields: [productId], references: [id])
 }
