@@ -32,7 +32,7 @@ async function main() {
       email: "admin@billing.com",
       mobile: "9000000001",
       password_hash: adminHash,
-      role: "admin",
+      role: "Admin",
       branch_code: branch.branch_code
     }
   });
@@ -45,7 +45,7 @@ async function main() {
       email: "cashier@billing.com",
       mobile: "9000000002",
       password_hash: cashierHash,
-      role: "cashier",
+      role: "Cashier",
       branch_code: branch.branch_code
     }
   });
@@ -58,7 +58,7 @@ async function main() {
       email: "accountant@billing.com",
       mobile: "9000000003",
       password_hash: accountantHash,
-      role: "accountant",
+      role: "Accountant",
       branch_code: branch.branch_code
     }
   });
