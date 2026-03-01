@@ -14,12 +14,12 @@ export const createParty = async (req: Request, res: Response) => {
   try {
     const {
       partyName,
-      mobile,
+      mobileNumber,
       email,
       gstin,
-      pan,
+      panNumber,
       partyType,
-      category,
+      partyCategory,
       billingAddress,
       shippingAddress,
       creditPeriod,
@@ -45,7 +45,7 @@ export const createParty = async (req: Request, res: Response) => {
     }
 
     // 🔴 PAN validation
-    if (pan && !validatePAN(pan)) {
+    if (panNumber && !validatePAN(panNumber)) {
       return res.status(400).json({
         success: false,
         message: "Invalid PAN number format"
@@ -78,12 +78,12 @@ export const createParty = async (req: Request, res: Response) => {
         name: gstData?.legal_name || partyName,     // ✅ REQUIRED
         partyName: gstData?.legal_name || partyName,
 
-        mobile,
+        mobileNumber,
         email,
         gstin,
-        pan,
+        panNumber,
         partyType,
-        category,
+        partyCategory,
         billingAddress: gstData?.address || billingAddress,
         shippingAddress,
         creditPeriod,
@@ -99,7 +99,7 @@ export const createParty = async (req: Request, res: Response) => {
       let credit: number | null = null;
       let type: LedgerType;
 
-      if (openingBalanceType === BalanceType.ToCollect) {
+      if (openingBalanceType === BalanceType.To_Collect) {
         debit = openingBalance;
         type = LedgerType.DEBIT;
       } else {
@@ -155,11 +155,11 @@ export const updateParty = async (req: Request, res: Response) => {
 
     const {
       partyName,
-      mobile,
+      mobileNumber,
       email,
       gstin,
-      pan,
-      category,
+      panNumber,
+      partyCategory,
       billingAddress,
       shippingAddress,
       creditPeriod,
@@ -175,7 +175,7 @@ export const updateParty = async (req: Request, res: Response) => {
     }
 
     // 🔴 PAN validation
-    if (pan && !validatePAN(pan)) {
+    if (panNumber && !validatePAN(panNumber)) {
       return res.status(400).json({
         success: false,
         message: "Invalid PAN number format"
@@ -200,11 +200,11 @@ export const updateParty = async (req: Request, res: Response) => {
         name: gstData?.legal_name || partyName,   // ✅ REQUIRED
         partyName: gstData?.legal_name || partyName,
 
-        mobile,
+        mobileNumber,
         email,
         gstin,
-        pan,
-        category,
+        panNumber,
+        partyCategory,
         billingAddress: gstData?.address || billingAddress,
         shippingAddress,
         creditPeriod,

@@ -8,7 +8,7 @@ CREATE TYPE "Status" AS ENUM ('active', 'disabled');
 CREATE TYPE "PartyType" AS ENUM ('Customer', 'Supplier');
 
 -- CreateEnum
-CREATE TYPE "BalanceType" AS ENUM ('ToCollect', 'ToPay');
+CREATE TYPE "BalanceType" AS ENUM ('To_Collect', 'To_Pay');
 
 -- CreateEnum
 CREATE TYPE "LedgerRefType" AS ENUM ('Invoice', 'Return', 'Opening', 'Payment');
@@ -72,13 +72,12 @@ CREATE TABLE "Party" (
     "id" SERIAL NOT NULL,
     "name" TEXT NOT NULL,
     "partyName" TEXT NOT NULL,
-    "phone" TEXT,
-    "mobile" TEXT,
+    "mobileNumber" TEXT,
     "email" TEXT,
     "gstin" TEXT,
-    "pan" TEXT,
+    "panNumber" TEXT,
     "partyType" "PartyType" NOT NULL,
-    "category" TEXT,
+    "partyCategory" TEXT,
     "billingAddress" TEXT,
     "shippingAddress" TEXT,
     "creditPeriod" INTEGER,
@@ -373,4 +372,3 @@ ALTER TABLE "InvoiceItem" ADD CONSTRAINT "InvoiceItem_invoiceId_fkey" FOREIGN KE
 
 -- AddForeignKey
 ALTER TABLE "InvoiceItem" ADD CONSTRAINT "InvoiceItem_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-

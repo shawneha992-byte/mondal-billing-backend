@@ -132,3 +132,55 @@ export const getInvoices = async (_req: Request, res: Response) => {
     return res.status(500).json({ message: "Failed to fetch invoices" });
   }
 };
+/**
+ * GET PARTY ITEM-WISE DATA
+ */
+export const getPartyItemWiseReport = async (
+  req: Request,
+  res: Response
+) => {
+  const partyId = Number(req.params.id);
+
+  try {
+    const invoices = await prisma.invoice.findMany({
+      where: { partyId },
+      include: {
+        items: {
+          include: {
+            product: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+    });
+
+    const transactions: any[] = [];
+
+    invoices.forEach((invoice) => {
+      invoice.items.forEach((item) => {
+        transactions.push({
+          partyId,
+          itemName: item.product.name,
+          itemCode: item.product.id.toString(),
+          quantity: item.quantity,
+          amount: item.total,
+          type: "Sale",
+          date: invoice.createdAt,
+        });
+      });
+    });
+
+    return res.json({
+      success: true,
+      data: transactions,
+    });
+  } catch (error) {
+    console.error("Item-wise report error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch item-wise report",
+    });
+  }
+};

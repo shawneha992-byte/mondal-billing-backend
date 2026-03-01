@@ -45,13 +45,12 @@ model Party {
   id                 Int            @id @default(autoincrement())
   name               String
   partyName          String
-  phone              String?
-  mobile             String?
+  mobileNumber             String?
   email              String?
   gstin              String?
-  pan                String?
+  panNumber               String?
   partyType          PartyType
-  category           String?
+  partyCategory           String?
   billingAddress     String?
   shippingAddress    String?
   creditPeriod       Int?
@@ -274,8 +273,8 @@ enum PartyType {
 }
 
 enum BalanceType {
-  ToCollect
-  ToPay
+  To_Collect
+  To_Pay
 }
 
 enum LedgerRefType {
