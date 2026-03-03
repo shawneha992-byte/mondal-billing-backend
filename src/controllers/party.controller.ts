@@ -256,7 +256,7 @@ export const getAllParties = async (_req: Request, res: Response) => {
  * ======================================================
  * GET PARTY BY ID
  * ======================================================
- */
+ 
 export const getPartyById = async (req: Request, res: Response) => {
   try {
     const partyId = Number(req.params.id);
@@ -290,5 +290,23 @@ export const getPartyById = async (req: Request, res: Response) => {
       success: false,
       message: "Failed to fetch party"
     });
+  }
+};*/
+export const getPartyById = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+
+    const party = await prisma.party.findUnique({
+      where: { id },
+    });
+
+    if (!party) {
+      return res.status(404).json({ message: "Party not found" });
+    }
+
+    res.json(party);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
   }
 };

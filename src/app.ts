@@ -8,7 +8,7 @@ import partyRoutes from "./routes/party.routes";
 import paymentInRoutes from "./routes/paymentIn.routes";
 import invoiceRoutes from "./routes/invoice.routes";
 import salesRoutes from "./routes/salesReturn.routes";
-
+import transactionRoutes from "./routes/transaction.routes";
 const app = express();
 
 /**
@@ -43,10 +43,14 @@ app.get("/health", (_req, res) => {
  * ✅ Register ALL routes
  */
 app.use(routes); // from routes/index.ts
-app.use("/api", partyLedgerRoutes);
+app.use("api", partyLedgerRoutes);
 app.use("/api", partyRoutes);
 app.use("/api/payment-in", paymentInRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/salesReturn", salesRoutes);
+
+app.use("/api/transactions", transactionRoutes);
+
+
 
 export default app;
