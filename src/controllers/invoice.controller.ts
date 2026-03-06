@@ -25,8 +25,8 @@ export const createInvoice = async (req: Request, res: Response) => {
           throw new Error(`Product not found (ID: ${item.productId})`);
         }
 
-        if (product.stock < item.quantity) {
-          throw new Error(`Insufficient stock for ${product.name}`);
+        if ((product.openingStock ?? 0) < item.quantity) {
+          throw new Error(`Insufficient openingStock for ${product.name}`);
         }
 
         subTotal += item.price * item.quantity;
@@ -67,7 +67,7 @@ export const createInvoice = async (req: Request, res: Response) => {
         await tx.product.update({
           where: { id: item.productId },
           data: {
-            stock: {
+            openingStock: {
               decrement: item.quantity,
             },
           },

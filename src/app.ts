@@ -9,6 +9,11 @@ import paymentInRoutes from "./routes/paymentIn.routes";
 import invoiceRoutes from "./routes/invoice.routes";
 import salesRoutes from "./routes/salesReturn.routes";
 import transactionRoutes from "./routes/transaction.routes";
+import itemRoutes from "./routes/item.routes";
+import categoryRoutes from "./routes/category.routes";
+import godownRoutes from "./routes/godown.routes";
+
+import productStockRoutes from "./routes/productStock.routes";
 const app = express();
 
 /**
@@ -48,9 +53,9 @@ app.use("/api", partyRoutes);
 app.use("/api/payment-in", paymentInRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/salesReturn", salesRoutes);
-
+app.use("/api/items", itemRoutes);
 app.use("/api/transactions", transactionRoutes);
-
-
-
+app.use("/api/categories", categoryRoutes);
+app.use("/api/godowns", godownRoutes);
+app.use("/api/product-stock", productStockRoutes);
 export default app;

@@ -69,14 +69,72 @@ model Party {
 }
 
 model Product {
-  id               Int               @id @default(autoincrement())
-  name             String
-  stock            Int
-  price            Float
-  createdAt        DateTime          @default(now())
+  id              Int       @id @default(autoincrement())
+
+  name            String
+  itemType        ItemType
+  category        String?
+
+  
+
+  
+  salesPrice      Decimal   @db.Decimal(10,2)
+
+  gstRate         Float?
+
+  unit            String?
+
+
+
+  serviceCode     String?
+
+  openingStock    Int?  
+
+  showOnlineStore Boolean   @default(false)
+  enableSerial    Boolean   @default(false)
+
+  status          Status    @default(active)
+  createdAt       DateTime  @default(now())
+
+   stocks ProductStock[]
+
   invoiceItems     InvoiceItem[]
   quotationItems   QuotationItem[]
   salesReturnItems SalesReturnItem[]
+}
+
+model Category {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  createdAt DateTime @default(now())
+}
+
+model Godown {
+  godown_id      Int      @id @default(autoincrement())
+  godown_name    String
+  street_address String?
+  state_name     String?
+  city_name      String?
+  pincode        String?
+  created_at     DateTime @default(now())
+  stocks ProductStock[]
+}
+
+model ProductStock {
+  id           Int      @id @default(autoincrement())
+
+  productId    Int
+  godownId     Int
+
+  openingStock Int
+  asOfDate     DateTime
+
+  createdAt    DateTime @default(now())
+
+  product      Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  godown       Godown    @relation(fields: [godownId], references: [godown_id])
+
+  @@unique([productId, godownId])
 }
 
 model PartyLedger {
@@ -314,4 +372,9 @@ enum ProformaStatus {
   DRAFT
   SENT
   CANCELLED
+}
+
+enum ItemType {
+  Product
+  Service
 }
