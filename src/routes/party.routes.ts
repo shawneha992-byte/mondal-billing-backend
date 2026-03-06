@@ -5,7 +5,7 @@ import {
   getAllParties,
   getPartyById
 } from "../controllers/party.controller";
-
+import { deleteParty } from "../controllers/party.controller";
 const router = express.Router();
 
 /**
@@ -23,5 +23,8 @@ router.get("/parties/:id", getPartyById);
 
 // Update Party
 router.put("/parties/:id", updateParty);
+
+//Delete party
+router.delete("/parties/:id", deleteParty);
 
 export default router;

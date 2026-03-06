@@ -45,12 +45,12 @@ model Party {
   id                 Int            @id @default(autoincrement())
   name               String
   partyName          String
-  mobileNumber             String?
+  mobileNumber       String?
   email              String?
   gstin              String?
-  panNumber               String?
+  panNumber          String?
   partyType          PartyType
-  partyCategory           String?
+  partyCategory      String?
   billingAddress     String?
   shippingAddress    String?
   creditPeriod       Int?
@@ -66,39 +66,28 @@ model Party {
   ledgerEntries      PartyLedger[]
   paymentsIn         PaymentIn[]
   salesReturns       SalesReturn[]
+  contactPersonName   String?
+  dateOfBirth         String?
+  bankAccounts PartyBankAccount[]
+  customFields PartyCustomField[]
 }
 
 model Product {
-  id              Int       @id @default(autoincrement())
-
-  name            String
-  itemType        ItemType
-  category        String?
-
-  
-
-  
-  salesPrice      Decimal   @db.Decimal(10,2)
-
-  gstRate         Float?
-
-  unit            String?
-
-
-
-  serviceCode     String?
-
-  openingStock    Int?  
-
-  showOnlineStore Boolean   @default(false)
-  enableSerial    Boolean   @default(false)
-
-  status          Status    @default(active)
-  createdAt       DateTime  @default(now())
-
-   stocks ProductStock[]
-
+  id               Int               @id @default(autoincrement())
+  name             String
+  createdAt        DateTime          @default(now())
+  category         String?
+  enableSerial     Boolean           @default(false)
+  gstRate          Float?
+  itemType         ItemType
+  openingStock     Int?
+  salesPrice       Decimal           @db.Decimal(10, 2)
+  serviceCode      String?
+  showOnlineStore  Boolean           @default(false)
+  status           Status            @default(active)
+  unit             String?
   invoiceItems     InvoiceItem[]
+  ProductStock     ProductStock[]
   quotationItems   QuotationItem[]
   salesReturnItems SalesReturnItem[]
 }
@@ -110,29 +99,29 @@ model Category {
 }
 
 model Godown {
-  godown_id      Int      @id @default(autoincrement())
+  godown_id      Int            @id @default(autoincrement())
   godown_name    String
   street_address String?
   state_name     String?
   city_name      String?
   pincode        String?
-  created_at     DateTime @default(now())
-  stocks ProductStock[]
+  created_at     DateTime       @default(now())
+  stocks         ProductStock[]
 }
 
 model ProductStock {
-  id           Int      @id @default(autoincrement())
+  id Int @id @default(autoincrement())
 
-  productId    Int
-  godownId     Int
+  productId Int
+  godownId  Int
 
   openingStock Int
   asOfDate     DateTime
 
-  createdAt    DateTime @default(now())
+  createdAt DateTime @default(now())
 
-  product      Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
-  godown       Godown    @relation(fields: [godownId], references: [godown_id])
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  godown  Godown  @relation(fields: [godownId], references: [godown_id])
 
   @@unique([productId, godownId])
 }
@@ -314,6 +303,39 @@ model InvoiceItem {
   product   Product @relation(fields: [productId], references: [id])
 }
 
+model PartyBankAccount {
+  id            Int             @id @default(autoincrement())
+  partyId       Int
+  accountHolder String
+  accountNumber String
+  bankName      String
+  ifscCode      String
+  branchName    String?
+  accountType   BankAccountType @default(Current)
+  isPrimary     Boolean         @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, accountNumber])
+  @@index([partyId])
+}
+
+model PartyCustomField {
+  id         Int    @id @default(autoincrement())
+  partyId    Int
+  fieldName  String
+  fieldValue String
+
+  createdAt DateTime @default(now())
+
+  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+
+  @@index([partyId])
+}
+
 enum Role {
   Admin
   Cashier
@@ -377,4 +399,10 @@ enum ProformaStatus {
 enum ItemType {
   Product
   Service
+}
+
+enum BankAccountType {
+  Savings
+  Current
+  OD
 }

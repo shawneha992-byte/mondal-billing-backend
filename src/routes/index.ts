@@ -5,6 +5,7 @@ import proformaRoutes from "./proforma.routes";
 import salesReturnRoutes from "./salesReturn.routes";
 import invoiceRoutes from "./invoice.routes";
 import transactionRoutes from "./transaction.routes";
+import partyExtraRoutes from "./partyExtra.routes";
 const router = Router();
 
 router.use("/api/auth", authRoutes);
@@ -13,4 +14,6 @@ router.use("/api/proforma", proformaRoutes);
 router.use("/api/sales-return", salesReturnRoutes);
 router.use("/api/invoices", invoiceRoutes);
 router.use("/transactions", transactionRoutes);
+router.use("/api", partyExtraRoutes);    
+
 export default router;
