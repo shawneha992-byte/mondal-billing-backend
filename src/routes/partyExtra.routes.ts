@@ -3,18 +3,19 @@ import {
   addBankAccount,
   getBankAccounts,
   updateBankAccount,
-  deleteBankAccount,
-  setPrimaryBankAccount,
+  deleteBankAccount
 } from "../controllers/partyBankAccount.controller";
+
 import {
   addCustomFields,
   getCustomFields,
   updateCustomField,
   deleteCustomField,
-  replaceAllCustomFields,
+  replaceAllCustomFields
 } from "../controllers/partyCustomField.controller";
 
 const router = express.Router();
+
 
 // ============================================================
 // BANK ACCOUNT ROUTES
@@ -32,9 +33,6 @@ router.put("/parties/:id/bank-accounts/:accountId", updateBankAccount);
 
 // Delete a specific bank account
 router.delete("/parties/:id/bank-accounts/:accountId", deleteBankAccount);
-
-// Set a bank account as primary
-router.patch("/parties/:id/bank-accounts/:accountId/set-primary", setPrimaryBankAccount);
 
 
 // ============================================================

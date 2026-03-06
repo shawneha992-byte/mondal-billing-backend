@@ -4,20 +4,19 @@ import { validateGST, validatePAN } from "../utils/gstPanValidator";
 import { fetchGSTDetails } from "../services/gstService";
 import { BalanceType, LedgerRefType, LedgerType } from "@prisma/client";
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────
 
 const validateIFSC = (ifsc: string): boolean =>
   /^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc.toUpperCase());
 
-/**
- * ======================================================
- * CREATE PARTY
- * POST /api/parties
- *
- * Supports optional bankAccounts[] and customFields[]
- * in the same request body.
- * ======================================================
- */
+
+// ======================================================
+// CREATE PARTY
+// POST /api/parties
+// ======================================================
+
 export const createParty = async (req: Request, res: Response) => {
   try {
     const {
@@ -34,13 +33,10 @@ export const createParty = async (req: Request, res: Response) => {
       creditLimit,
       openingBalance,
       openingBalanceType,
-
-      // ✅ NEW: optional arrays
-      bankAccounts = [],   // [{ accountHolder, accountNumber, bankName, ifscCode, branchName?, accountType, isPrimary? }]
-      customFields = [],   // [{ fieldName, fieldValue }]
+      bankAccounts = [],
+      customFields = [],
     } = req.body;
 
-    // ── Basic validation ─────────────────────────────────────
     if (!partyName || !partyType) {
       return res.status(400).json({
         success: false,
@@ -49,11 +45,17 @@ export const createParty = async (req: Request, res: Response) => {
     }
 
     if (gstin && !validateGST(gstin)) {
-      return res.status(400).json({ success: false, message: "Invalid GST number format" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid GST number format",
+      });
     }
 
     if (panNumber && !validatePAN(panNumber)) {
-      return res.status(400).json({ success: false, message: "Invalid PAN number format" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid PAN number format",
+      });
     }
 
     if (openingBalance && !openingBalanceType) {
@@ -63,60 +65,36 @@ export const createParty = async (req: Request, res: Response) => {
       });
     }
 
-    // ── Validate bank accounts ────────────────────────────────
-    const validBankTypes = ["Savings", "Current", "OD"];
     for (const acc of bankAccounts) {
-      if (!acc.accountHolder || !acc.accountNumber || !acc.bankName || !acc.ifscCode || !acc.accountType) {
+      if (!acc.accountHolder || !acc.accountNumber || !acc.bankName || !acc.ifscCode) {
         return res.status(400).json({
           success: false,
-          message: "Each bank account must have accountHolder, accountNumber, bankName, ifscCode, and accountType",
+          message: "Each bank account must have accountHolder, accountNumber, bankName and ifscCode",
         });
       }
+
       if (!validateIFSC(acc.ifscCode)) {
         return res.status(400).json({
           success: false,
           message: `Invalid IFSC code: ${acc.ifscCode}`,
         });
       }
-      if (!validBankTypes.includes(acc.accountType)) {
-        return res.status(400).json({
-          success: false,
-          message: `accountType must be one of: ${validBankTypes.join(", ")}`,
-        });
-      }
     }
 
-    // ── Validate custom fields ────────────────────────────────
-    for (const field of customFields) {
-      if (!field.fieldName || field.fieldValue === undefined) {
-        return res.status(400).json({
-          success: false,
-          message: "Each customField must have fieldName and fieldValue",
-        });
-      }
-    }
-
-    // ── Ensure at most one bank account is marked primary ─────
-    const primaryBanks = bankAccounts.filter((a: any) => a.isPrimary);
-    if (primaryBanks.length > 1) {
-      return res.status(400).json({
-        success: false,
-        message: "Only one bank account can be marked as primary",
-      });
-    }
-
-    // ── Fetch GST details if GSTIN provided ──────────────────
     let gstData: any = null;
+
     if (gstin) {
       gstData = await fetchGSTDetails(gstin);
+
       if (!gstData) {
-        return res.status(400).json({ success: false, message: "GSTIN not found or inactive" });
+        return res.status(400).json({
+          success: false,
+          message: "GSTIN not found or inactive",
+        });
       }
     }
 
-    // ── Create Party + bank accounts + custom fields in one transaction ──
     const party = await prisma.$transaction(async (tx) => {
-      // 1. Create the party
       const newParty = await tx.party.create({
         data: {
           name: gstData?.legal_name || partyName,
@@ -136,9 +114,9 @@ export const createParty = async (req: Request, res: Response) => {
         },
       });
 
-      // 2. Create opening ledger entry
       if (openingBalance && openingBalance > 0) {
         const isDebit = openingBalanceType === BalanceType.To_Collect;
+
         await tx.partyLedger.create({
           data: {
             partyId: newParty.id,
@@ -151,30 +129,26 @@ export const createParty = async (req: Request, res: Response) => {
         });
       }
 
-      // 3. Create bank accounts
       if (bankAccounts.length > 0) {
         await tx.partyBankAccount.createMany({
-          data: bankAccounts.map((acc: any, idx: number) => ({
+          data: bankAccounts.map((acc: any) => ({
             partyId: newParty.id,
             accountHolder: acc.accountHolder,
             accountNumber: acc.accountNumber,
             bankName: acc.bankName,
             ifscCode: acc.ifscCode.toUpperCase(),
             branchName: acc.branchName || null,
-            accountType: acc.accountType,
-            // If nobody marked primary, auto-mark the first one
-            isPrimary: acc.isPrimary ?? (primaryBanks.length === 0 && idx === 0),
+            upiId: acc.upiId || null,
           })),
         });
       }
 
-      // 4. Create custom fields
       if (customFields.length > 0) {
         await tx.partyCustomField.createMany({
           data: customFields.map((field: any) => ({
             partyId: newParty.id,
-            fieldName: String(field.fieldName).trim(),
-            fieldValue: String(field.fieldValue).trim(),
+            fieldName: field.fieldName,
+            fieldValue: field.fieldValue,
           })),
         });
       }
@@ -182,10 +156,12 @@ export const createParty = async (req: Request, res: Response) => {
       return newParty;
     });
 
-    // Re-fetch with all relations for the response
     const fullParty = await prisma.party.findUnique({
       where: { id: party.id },
-      include: { bankAccounts: true, customFields: true },
+      include: {
+        bankAccounts: { orderBy: { createdAt: "asc" } },
+        customFields: { orderBy: { createdAt: "asc" } },
+      },
     });
 
     return res.status(201).json({
@@ -195,172 +171,112 @@ export const createParty = async (req: Request, res: Response) => {
     });
 
   } catch (error) {
-    console.error("❌ Create Party Error:", error);
+    console.error("Create Party Error:", error);
     return res.status(500).json({ success: false, message: "Failed to create party" });
   }
 };
 
-/**
- * ======================================================
- * UPDATE PARTY
- * PUT /api/parties/:id
- * ======================================================
- */
+
+// ======================================================
+// UPDATE PARTY
+// PUT /api/parties/:id
+// ======================================================
+
 export const updateParty = async (req: Request, res: Response) => {
   try {
-    const partyId = Number(req.params.id);
-
-    if (isNaN(partyId)) {
-      return res.status(400).json({ success: false, message: "Invalid party ID" });
-    }
-
-    const {
-      partyName,
-      mobileNumber,
-      email,
-      gstin,
-      panNumber,
-      partyCategory,
-      billingAddress,
-      shippingAddress,
-      creditPeriod,
-      creditLimit,
-      contactPersonName,
-      dateOfBirth,
-    } = req.body;
-
-    if (gstin && !validateGST(gstin)) {
-      return res.status(400).json({ success: false, message: "Invalid GST number format" });
-    }
-
-    if (panNumber && !validatePAN(panNumber)) {
-      return res.status(400).json({ success: false, message: "Invalid PAN number format" });
-    }
-
-    let gstData: any = null;
-    if (gstin) {
-      gstData = await fetchGSTDetails(gstin);
-      if (!gstData) {
-        return res.status(400).json({ success: false, message: "GSTIN not found or inactive" });
-      }
-    }
+    const id = Number(req.params.id);
 
     const party = await prisma.party.update({
-      where: { id: partyId },
-      data: {
-        name: gstData?.legal_name || partyName,
-        partyName: gstData?.legal_name || partyName,
-        mobileNumber,
-        email,
-        gstin,
-        panNumber,
-        partyCategory,
-        billingAddress: gstData?.address || billingAddress,
-        shippingAddress,
-        creditPeriod,
-        creditLimit,
-        contactPersonName,
-        dateOfBirth,
-      },
+      where: { id },
+      data: req.body,
     });
 
-    return res.status(200).json({
+    return res.json({
       success: true,
-      message: "Party updated successfully",
+      message: "Party updated",
       data: party,
     });
 
   } catch (error) {
-    console.error("❌ Update Party Error:", error);
-    return res.status(500).json({ success: false, message: "Failed to update party" });
+    console.error("Update Party Error:", error);
+    res.status(500).json({ success: false, message: "Failed to update party" });
   }
 };
 
-/**
- * ======================================================
- * GET ALL PARTIES
- * GET /api/parties
- * ======================================================
- */
+
+// ======================================================
+// GET ALL PARTIES
+// GET /api/parties
+// ======================================================
+
 export const getAllParties = async (_req: Request, res: Response) => {
   try {
     const parties = await prisma.party.findMany({
-      orderBy: { created_at: "desc" },
+      orderBy: { createdAt: "desc" },
     });
 
-    return res.status(200).json({ success: true, data: parties });
+    res.json({ success: true, data: parties });
 
   } catch (error) {
-    console.error("❌ Get Parties Error:", error);
-    return res.status(500).json({ success: false, message: "Failed to fetch parties" });
+    console.error("Get Parties Error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch parties" });
   }
 };
 
-/**
- * ======================================================
- * GET PARTY BY ID
- * GET /api/parties/:id
- * Includes bankAccounts and customFields
- * ======================================================
- */
+
+// ======================================================
+// GET PARTY BY ID
+// GET /api/parties/:id
+// ======================================================
+
 export const getPartyById = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
 
-    if (isNaN(id)) {
-      return res.status(400).json({ success: false, message: "Invalid party ID" });
-    }
-
     const party = await prisma.party.findUnique({
       where: { id },
       include: {
-        bankAccounts: {
-          orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
-        },
-        customFields: {
-          orderBy: { createdAt: "asc" },
-        },
+        bankAccounts: { orderBy: { createdAt: "asc" } },
+        customFields: { orderBy: { createdAt: "asc" } },
       },
     });
 
     if (!party) {
-      return res.status(404).json({ success: false, message: "Party not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Party not found",
+      });
     }
 
-    return res.status(200).json({ success: true, data: party });
+    res.json({ success: true, data: party });
 
   } catch (error) {
-    console.error("❌ Get Party By ID Error:", error);
-    return res.status(500).json({ success: false, message: "Server error" });
+    console.error("Get Party Error:", error);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
-/**
- * ======================================================
- * DELETE PARTY
- * DELETE /api/parties/:id
- * ======================================================
- */
+
+// ======================================================
+// DELETE PARTY
+// DELETE /api/parties/:id
+// ======================================================
+
 export const deleteParty = async (req: Request, res: Response) => {
   try {
-    const partyId = Number(req.params.id);
+    const id = Number(req.params.id);
 
-    if (isNaN(partyId)) {
-      return res.status(400).json({ success: false, message: "Invalid party ID" });
-    }
+    await prisma.party.delete({
+      where: { id },
+    });
 
-    const party = await prisma.party.findUnique({ where: { id: partyId } });
-
-    if (!party) {
-      return res.status(404).json({ success: false, message: "Party not found" });
-    }
-
-    await prisma.party.delete({ where: { id: partyId } });
-
-    return res.status(200).json({ success: true, message: "Party deleted successfully" });
+    res.json({
+      success: true,
+      message: "Party deleted successfully",
+    });
 
   } catch (error) {
-    console.error("❌ Delete Party Error:", error);
-    return res.status(500).json({ success: false, message: "Failed to delete party" });
+    console.error("Delete Party Error:", error);
+    res.status(500).json({ success: false, message: "Failed to delete party" });
   }
 };
