@@ -1,19 +1,27 @@
 import { Router } from "express";
+
 import authRoutes from "./auth.routes";
-import quotationRoutes from "./quotation.routes";
-import proformaRoutes from "./proforma.routes";
-import salesReturnRoutes from "./salesReturn.routes";
+import itemRoutes from "./item.routes";
 import invoiceRoutes from "./invoice.routes";
+import partyRoutes from "./party.routes";
+import partyLedgerRoutes from "./partyLedger.routes";
+import paymentInRoutes from "./paymentIn.routes";
+import salesReturnRoutes from "./salesReturn.routes";
 import transactionRoutes from "./transaction.routes";
 import partyExtraRoutes from "./partyExtra.routes";
+import categoryRoutes from "./category.routes";
+import godownRoutes from "./godown.routes";
 const router = Router();
 
-router.use("/api/auth", authRoutes);
-router.use("/api/quotations", quotationRoutes);
-router.use("/api/proforma", proformaRoutes);
-router.use("/api/sales-return", salesReturnRoutes);
-router.use("/api/invoices", invoiceRoutes);
+router.use("/auth", authRoutes);
+router.use("/items", itemRoutes);
+router.use("/invoices", invoiceRoutes);
+router.use("/parties", partyRoutes);
+router.use("/party-ledger", partyLedgerRoutes);
+router.use("/payment-in", paymentInRoutes);
+router.use("/sales-return", salesReturnRoutes);
 router.use("/transactions", transactionRoutes);
-router.use("/api", partyExtraRoutes);    
-
+router.use("/", partyExtraRoutes);
+router.use("/categories", categoryRoutes);
+router.use("/godowns", godownRoutes);
 export default router;

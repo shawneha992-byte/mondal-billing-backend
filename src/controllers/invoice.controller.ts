@@ -17,6 +17,7 @@ export const createInvoice = async (req: Request, res: Response) => {
 
       // 1️⃣ Validate stock & calculate subtotal
       for (const item of items) {
+
         const product = await tx.product.findUnique({
           where: { id: item.productId },
         });
@@ -25,8 +26,13 @@ export const createInvoice = async (req: Request, res: Response) => {
           throw new Error(`Product not found (ID: ${item.productId})`);
         }
 
-        if ((product.openingStock ?? 0) < item.quantity) {
-          throw new Error(`Insufficient openingStock for ${product.name}`);
+        // 🔹 NEW: check stock from ProductStock
+        const stock = await tx.productStock.findFirst({
+          where: { productId: item.productId },
+        });
+
+        if (!stock || stock.openingStock < item.quantity) {
+          throw new Error(`Insufficient stock for ${product.name}`);
         }
 
         subTotal += item.price * item.quantity;
@@ -36,19 +42,17 @@ export const createInvoice = async (req: Request, res: Response) => {
       const taxAmount = subTotal * 0.18;
       const totalAmount = subTotal + taxAmount;
 
-      // 3️⃣ Create invoice (schema aligned)
+      // 3️⃣ Create invoice
       const invoice = await tx.invoice.create({
         data: {
           invoiceNo: `INV-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
 
-          // relation (unchecked create)
           partyId,
 
           subTotal,
           taxAmount,
           totalAmount,
 
-          // REQUIRED by schema
           outstandingAmount: totalAmount,
 
           items: {
@@ -62,16 +66,23 @@ export const createInvoice = async (req: Request, res: Response) => {
         },
       });
 
-      // 4️⃣ Reduce product stock
+      // 4️⃣ Reduce product stock (UPDATED)
       for (const item of items) {
-        await tx.product.update({
-          where: { id: item.productId },
-          data: {
-            openingStock: {
-              decrement: item.quantity,
-            },
-          },
+
+        const stock = await tx.productStock.findFirst({
+          where: { productId: item.productId },
         });
+
+        if (stock) {
+          await tx.productStock.update({
+            where: { id: stock.id },
+            data: {
+              openingStock: {
+                decrement: item.quantity,
+              },
+            },
+          });
+        }
       }
 
       // 5️⃣ Party Ledger (DEBIT entry)
@@ -79,17 +90,14 @@ export const createInvoice = async (req: Request, res: Response) => {
         data: {
           partyId,
 
-          // REQUIRED reference fields
           refType: "Invoice",
           refId: invoice.id,
           reference: invoice.invoiceNo,
 
-          // Accounting
           type: "DEBIT",
           debit: totalAmount,
           credit: 0,
 
-          // REQUIRED balance
           balance: totalAmount,
         },
       });
@@ -101,11 +109,13 @@ export const createInvoice = async (req: Request, res: Response) => {
       message: "Invoice created successfully",
       invoice,
     });
+
   } catch (error: any) {
     console.error("Create invoice error:", error);
     return res.status(400).json({ error: error.message });
   }
 };
+
 
 /**
  * GET ALL INVOICES
@@ -127,11 +137,14 @@ export const getInvoices = async (_req: Request, res: Response) => {
     });
 
     return res.json(invoices);
+
   } catch (error) {
     console.error("Fetch invoices error:", error);
     return res.status(500).json({ message: "Failed to fetch invoices" });
   }
 };
+
+
 /**
  * GET PARTY ITEM-WISE DATA
  */
@@ -176,6 +189,7 @@ export const getPartyItemWiseReport = async (
       success: true,
       data: transactions,
     });
+
   } catch (error) {
     console.error("Item-wise report error:", error);
     return res.status(500).json({
