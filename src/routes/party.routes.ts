@@ -3,28 +3,25 @@ import {
   createParty,
   updateParty,
   getAllParties,
-  getPartyById
+  getPartyById,
+  deleteParty
 } from "../controllers/party.controller";
-import { deleteParty } from "../controllers/party.controller";
+
 const router = express.Router();
 
-/**
- * PARTY ROUTES
- */
-
 // Create Party
-router.post("/parties", createParty);
+router.post("/", createParty);
 
 // Get All Parties
-router.get("/parties", getAllParties);
+router.get("/", getAllParties);
 
 // Get Party By ID
-router.get("/parties/:id", getPartyById);
+router.get("/:id", getPartyById);
 
 // Update Party
-router.put("/parties/:id", updateParty);
+router.put("/:id", updateParty);
 
-//Delete party
-router.delete("/parties/:id", deleteParty);
+// Delete Party
+router.delete("/:id", deleteParty);
 
 export default router;
