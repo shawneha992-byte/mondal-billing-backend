@@ -8,12 +8,13 @@ datasource db {
 }
 
 model Branch {
-  id          Int     @id @default(autoincrement())
+  id          Int       @id @default(autoincrement())
   branch_name String
-  branch_code String  @unique
+  branch_code String    @unique
   address     String?
-  status      Status  @default(active)
+  status      Status    @default(active)
   users       User[]
+  invoices    Invoice[]
 }
 
 model User {
@@ -231,20 +232,61 @@ model PaymentAllocation {
 }
 
 model Invoice {
-  id                Int                 @id @default(autoincrement())
-  invoiceNo         String              @unique
-  partyId           Int
-  subTotal          Decimal?            @db.Decimal(12, 2)
-  taxAmount         Decimal?            @db.Decimal(12, 2)
-  totalAmount       Decimal             @db.Decimal(12, 2)
-  outstandingAmount Decimal             @db.Decimal(12, 2)
-  status            InvoiceStatus       @default(OPEN)
-  createdAt         DateTime            @default(now())
-  created_at        DateTime            @default(now())
-  party             Party               @relation(fields: [partyId], references: [id])
+  id        Int    @id @default(autoincrement())
+  invoiceNo String @unique
+
+  partyId Int
+  party   Party @relation(fields: [partyId], references: [id])
+
+  branchCode  String?
+  branch      Branch?   @relation(fields: [branchCode], references: [branch_code])
+  
+  invoiceDate DateTime  @default(now())
+  dueDate     DateTime?
+
+  // Top section
+  ewayBillNo     String?
+  challanNo      String?
+  financedBy     String?
+  salesman       String?
+  emailId        String?
+  warrantyPeriod String?
+
+  // Notes
+  notes           String?
+  termsConditions String?
+
+  // Amounts
+  subTotal               Decimal? @db.Decimal(12, 2)
+  taxableAmount          Decimal? @db.Decimal(12, 2)
+  discountAmount         Decimal? @db.Decimal(12, 2)
+  additionalChargesTotal Decimal? @db.Decimal(12, 2)
+  taxAmount              Decimal? @db.Decimal(12, 2)
+  roundOff               Decimal? @db.Decimal(12, 2)
+
+  totalAmount Decimal @db.Decimal(12, 2)
+
+  receivedAmount    Decimal? @db.Decimal(12, 2)
+  outstandingAmount Decimal  @db.Decimal(12, 2)
+
+  paymentMode PaymentMode?
+
+  applyTcs     Boolean @default(false)
+  autoRoundOff Boolean @default(false)
+
+  status InvoiceStatus @default(OPEN)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   items             InvoiceItem[]
   allocations       PaymentAllocation[]
   salesReturns      SalesReturn[]
+  additionalCharges InvoiceAdditionalCharge[]
+
+  @@index([partyId])
+  @@index([invoiceDate])
+  @@index([branchCode])
 }
 
 model PartyContact {
@@ -353,14 +395,34 @@ model ProformaInvoiceItem {
 }
 
 model InvoiceItem {
-  id        Int     @id @default(autoincrement())
+  id Int @id @default(autoincrement())
+
   invoiceId Int
   productId Int
-  quantity  Int
-  price     Float
-  total     Float
-  invoice   Invoice @relation(fields: [invoiceId], references: [id])
-  product   Product @relation(fields: [productId], references: [id])
+
+  quantity Int
+
+  price Decimal @db.Decimal(10, 2)
+
+  discount Decimal? @db.Decimal(10, 2)
+
+  taxRate   Float?
+  taxAmount Decimal? @db.Decimal(10, 2)
+
+  total Decimal @db.Decimal(10, 2)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+}
+
+model InvoiceAdditionalCharge {
+  id Int @id @default(autoincrement())
+
+  invoiceId Int
+  name      String
+  amount    Decimal @db.Decimal(10, 2)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 }
 
 model PartyBankAccount {
