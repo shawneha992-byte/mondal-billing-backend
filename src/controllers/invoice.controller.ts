@@ -432,7 +432,16 @@ export const recordInvoicePayment = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
 
-  const { amount, paymentMode } = req.body;
+  const {
+    amount,
+    paymentMode,
+    paymentDate,
+    discount    = 0,
+    notes,
+    applyTds    = false,
+    tdsAmount   = 0,
+  } = req.body;
+
   if (!amount || amount <= 0) return res.status(400).json({ success: false, message: "Invalid payment amount" });
 
   try {
@@ -445,12 +454,14 @@ export const recordInvoicePayment = async (req: Request, res: Response) => {
       if (invoice.status === InvoiceStatus.PAID)      throw new Error("Invoice is already fully paid");
 
       const currentOutstanding = Number(invoice.outstandingAmount ?? 0);
-      if (amount > currentOutstanding) {
-        throw new Error(`Payment (${amount}) exceeds outstanding amount (${currentOutstanding})`);
+      // Total settlement = cash received + any discount given
+      const totalSettlement = amount + Number(discount ?? 0);
+      if (totalSettlement > currentOutstanding + 0.01) {
+        throw new Error(`Payment + discount (${totalSettlement}) exceeds outstanding amount (${currentOutstanding})`);
       }
 
       const newReceived    = Number(invoice.receivedAmount ?? 0) + amount;
-      const newOutstanding = currentOutstanding - amount;
+      const newOutstanding = Math.max(0, Math.round((currentOutstanding - totalSettlement) * 100) / 100);
       const newStatus      = deriveStatus(newReceived, Number(invoice.totalAmount));
 
       const updated = await (tx.invoice.update as any)({
