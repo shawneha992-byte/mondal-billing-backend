@@ -18,7 +18,7 @@ router.use("/items", itemRoutes);
 router.use("/invoices", invoiceRoutes);
 router.use("/parties", partyRoutes);
 router.use("/party-ledger", partyLedgerRoutes);
-router.use("/payment-in", paymentInRoutes);
+router.use("/payments-in", paymentInRoutes);
 router.use("/sales-return", salesReturnRoutes);
 router.use("/transactions", transactionRoutes);
 router.use("/", partyExtraRoutes);
