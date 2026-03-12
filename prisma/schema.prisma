@@ -17,6 +17,8 @@ model Branch {
   invoices         Invoice[]
   purchaseInvoices PurchaseInvoice[]
   quotations       Quotation[]
+  quotationSettings QuotationSettings[]
+
 }
 
 model User {
@@ -317,7 +319,8 @@ model SalesReturnItem {
 model Quotation {
   id Int @id @default(autoincrement())
 
-  quotationNo String @unique
+quotationNo String @unique @default(cuid())
+
 
   partyId Int
   party   Party @relation(fields: [partyId], references: [id])
@@ -391,6 +394,17 @@ model QuotationAdditionalCharge {
 
   quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
 }
+model QuotationSettings {
+  id Int @id @default(autoincrement())
+
+  prefix String?
+  sequenceNumber Int @default(1)
+
+  branchCode String?
+
+  branch Branch? @relation(fields: [branchCode], references: [branch_code])
+}
+
 
 model ProformaInvoice {
   id             String                @id @default(uuid())
