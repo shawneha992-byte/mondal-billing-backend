@@ -8,17 +8,16 @@ datasource db {
 }
 
 model Branch {
-  id               Int               @id @default(autoincrement())
-  branch_name      String
-  branch_code      String            @unique
-  address          String?
-  status           Status            @default(active)
-  users            User[]
-  invoices         Invoice[]
-  purchaseInvoices PurchaseInvoice[]
-  quotations       Quotation[]
+  id                Int                 @id @default(autoincrement())
+  branch_name       String
+  branch_code       String              @unique
+  address           String?
+  status            Status              @default(active)
+  invoices          Invoice[]
+  purchaseInvoices  PurchaseInvoice[]
+  quotations        Quotation[]
   quotationSettings QuotationSettings[]
-
+  users             User[]
 }
 
 model User {
@@ -76,8 +75,9 @@ model Party {
   partyPrices        PartyWisePrice[]
   paymentsIn         PaymentIn[]
   purchaseInvoices   PurchaseInvoice[]
+  Quotation          Quotation[]
   salesReturns       SalesReturn[]
-  quotations         Quotation[]
+  paymentOuts        PaymentOut[]
 }
 
 model Product {
@@ -138,9 +138,9 @@ model ProductStock {
   productId    Int
   godownId     Int
   openingStock Int
-  currentStock Int      @default(0)
   asOfDate     DateTime
   createdAt    DateTime @default(now())
+  currentStock Int      @default(0)
   godown       Godown   @relation(fields: [godownId], references: [godown_id], onDelete: Cascade)
   product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
@@ -319,8 +319,7 @@ model SalesReturnItem {
 model Quotation {
   id Int @id @default(autoincrement())
 
-quotationNo String @unique @default(cuid())
-
+  quotationNo String @unique @default(cuid())
 
   partyId Int
   party   Party @relation(fields: [partyId], references: [id])
@@ -394,17 +393,17 @@ model QuotationAdditionalCharge {
 
   quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
 }
+
 model QuotationSettings {
   id Int @id @default(autoincrement())
 
-  prefix String?
-  sequenceNumber Int @default(1)
+  prefix         String?
+  sequenceNumber Int     @default(1)
 
   branchCode String?
 
   branch Branch? @relation(fields: [branchCode], references: [branch_code])
 }
-
 
 model ProformaInvoice {
   id             String                @id @default(uuid())
@@ -521,6 +520,7 @@ model PurchaseInvoice {
   party                  Party                             @relation(fields: [partyId], references: [id])
   additionalCharges      PurchaseInvoiceAdditionalCharge[]
   items                  PurchaseInvoiceItem[]
+  paymentOutInvoices     PaymentOutInvoice[]
 
   @@index([partyId])
   @@index([invoiceDate])
@@ -549,6 +549,41 @@ model PurchaseInvoiceAdditionalCharge {
   name              String
   amount            Decimal         @db.Decimal(10, 2)
   purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
+}
+
+model PaymentOut {
+  id Int @id @default(autoincrement())
+
+  paymentNumber String   @unique
+  date          DateTime
+
+  partyId Int
+  party   Party @relation(fields: [partyId], references: [id])
+
+  amountPaid Decimal  @db.Decimal(12, 2)
+  discount   Decimal? @db.Decimal(12, 2)
+
+  paymentMode PaymentMode
+  notes       String?
+
+  createdAt DateTime @default(now())
+
+  invoices PaymentOutInvoice[]
+}
+
+model PaymentOutInvoice {
+  id Int @id @default(autoincrement())
+
+  paymentOutId Int
+  paymentOut   PaymentOut @relation(fields: [paymentOutId], references: [id])
+
+  purchaseInvoiceId Int
+  purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id])
+
+  invoiceAmount Decimal  @db.Decimal(12, 2)
+  discount      Decimal? @db.Decimal(12, 2)
+  amountPaid    Decimal  @db.Decimal(12, 2)
+  balanceAmount Decimal  @db.Decimal(12, 2)
 }
 
 enum PurchaseInvoiceStatus {
