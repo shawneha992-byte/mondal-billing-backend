@@ -11,7 +11,7 @@ import transactionRoutes from "./transaction.routes";
 import partyExtraRoutes from "./partyExtra.routes";
 import categoryRoutes from "./category.routes";
 import godownRoutes from "./godown.routes";
-import purchaseInvoiceRoutes from "./Purcahseinvoice.routes";
+import purchaseInvoiceRoutes from "./Purchaseinvoice.routes";
 const router = Router();
 
 router.use("/auth", authRoutes);

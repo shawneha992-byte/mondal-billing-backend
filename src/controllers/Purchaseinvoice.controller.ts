@@ -359,11 +359,50 @@ export const deletePurchaseInvoice = async (req: Request, res: Response) => {
 
   const id = Number(req.params.id);
 
-  await prisma.purchaseInvoice.delete({
-    where: { id }
+  await prisma.$transaction(async (tx) => {
+
+    const invoice = await tx.purchaseInvoice.findUnique({
+      where: { id },
+      include: { items: true }
+    });
+
+    if (!invoice) {
+      throw new Error("Invoice not found");
+    }
+
+    /* reverse stock */
+
+    for (const item of invoice.items) {
+
+      const stock = await tx.productStock.findFirst({
+        where: { productId: item.productId }
+      });
+
+      if (stock) {
+
+        await tx.productStock.update({
+          where: { id: stock.id },
+          data: {
+            currentStock: {
+              decrement: item.quantity
+            }
+          }
+        });
+
+      }
+
+    }
+
+    await tx.purchaseInvoice.delete({
+      where: { id }
+    });
+
   });
 
-  res.json({ success: true, message: "Invoice deleted" });
+  res.json({
+    success: true,
+    message: "Invoice deleted and stock adjusted"
+  });
 
 };
 
@@ -376,14 +415,54 @@ export const cancelPurchaseInvoice = async (req: Request, res: Response) => {
 
   const id = Number(req.params.id);
 
-  const invoice = await prisma.purchaseInvoice.update({
-    where: { id },
-    data: {
-      status: PurchaseInvoiceStatus.CANCELLED
+  const result = await prisma.$transaction(async (tx) => {
+
+    const invoice = await tx.purchaseInvoice.findUnique({
+      where: { id },
+      include: { items: true }
+    });
+
+    if (!invoice) {
+      throw new Error("Invoice not found");
     }
+
+    if (invoice.status === PurchaseInvoiceStatus.CANCELLED) {
+      throw new Error("Invoice already cancelled");
+    }
+
+    /* reverse stock */
+
+    for (const item of invoice.items) {
+
+      const stock = await tx.productStock.findFirst({
+        where: { productId: item.productId }
+      });
+
+      if (stock) {
+
+        await tx.productStock.update({
+          where: { id: stock.id },
+          data: {
+            currentStock: {
+              decrement: item.quantity
+            }
+          }
+        });
+
+      }
+
+    }
+
+    return tx.purchaseInvoice.update({
+      where: { id },
+      data: {
+        status: PurchaseInvoiceStatus.CANCELLED
+      }
+    });
+
   });
 
-  res.json({ success: true, data: invoice });
+  res.json({ success: true, data: result });
 
 };
 
