@@ -16,6 +16,7 @@ model Branch {
   users            User[]
   invoices         Invoice[]
   purchaseInvoices PurchaseInvoice[]
+  quotations       Quotation[]
 }
 
 model User {
@@ -62,44 +63,25 @@ model Party {
   status             Status             @default(active)
   createdAt          DateTime           @default(now())
   created_at         DateTime           @default(now())
-  invoices           Invoice[]
-  addresses          PartyAddress[]
-  contacts           PartyContact[]
-  ledgerEntries      PartyLedger[]
-  paymentsIn         PaymentIn[]
-  salesReturns       SalesReturn[]
   contactPersonName  String?
   dateOfBirth        String?
+  invoices           Invoice[]
+  addresses          PartyAddress[]
   bankAccounts       PartyBankAccount[]
+  contacts           PartyContact[]
   customFields       PartyCustomField[]
+  ledgerEntries      PartyLedger[]
   partyPrices        PartyWisePrice[]
+  paymentsIn         PaymentIn[]
   purchaseInvoices   PurchaseInvoice[]
+  salesReturns       SalesReturn[]
+  quotations         Quotation[]
 }
 
 model Product {
-  id        Int      @id @default(autoincrement())
-  name      String
-  createdAt DateTime @default(now())
-  itemCode  String?  @unique
-  hsnCode   String?
-  sacCode   String?
-
-  description String?
-
-  purchasePrice Decimal? @db.Decimal(10, 2)
-
-  salesDiscountPercent Float?
-
-  lowStockAlert Boolean @default(false)
-  lowStockQty   Int?
-
-  mrpEnabled Boolean  @default(false)
-  mrp        Decimal? @db.Decimal(10, 2)
-
-  wholesaleEnabled Boolean  @default(false)
-  wholesalePrice   Decimal? @db.Decimal(10, 2)
-
-  trackBatchExpiry     Boolean               @default(false)
+  id                   Int                   @id @default(autoincrement())
+  name                 String
+  createdAt            DateTime              @default(now())
   category             String?
   enableSerial         Boolean               @default(false)
   gstRate              String?
@@ -109,14 +91,27 @@ model Product {
   showOnlineStore      Boolean               @default(false)
   status               Status                @default(active)
   unit                 String?
+  description          String?
+  hsnCode              String?
+  itemCode             String?               @unique
+  lowStockAlert        Boolean               @default(false)
+  lowStockQty          Int?
+  mrp                  Decimal?              @db.Decimal(10, 2)
+  mrpEnabled           Boolean               @default(false)
+  purchasePrice        Decimal?              @db.Decimal(10, 2)
+  sacCode              String?
+  salesDiscountPercent Float?
+  trackBatchExpiry     Boolean               @default(false)
+  wholesaleEnabled     Boolean               @default(false)
+  wholesalePrice       Decimal?              @db.Decimal(10, 2)
   invoiceItems         InvoiceItem[]
+  partyPrices          PartyWisePrice[]
+  ProductCustomField   ProductCustomField[]
+  images               ProductImage[]
   ProductStock         ProductStock[]
+  purchaseInvoiceItems PurchaseInvoiceItem[]
   quotationItems       QuotationItem[]
   salesReturnItems     SalesReturnItem[]
-  partyPrices          PartyWisePrice[]
-  images               ProductImage[]
-  ProductCustomField   ProductCustomField[]
-  purchaseInvoiceItems PurchaseInvoiceItem[]
 }
 
 model Category {
@@ -137,58 +132,46 @@ model Godown {
 }
 
 model ProductStock {
-  id Int @id @default(autoincrement())
-
-  productId Int
-  godownId  Int
-
+  id           Int      @id @default(autoincrement())
+  productId    Int
+  godownId     Int
   openingStock Int
-  currentStock Int @default(0)
+  currentStock Int      @default(0)
   asOfDate     DateTime
-
-  createdAt DateTime @default(now())
-
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
-  godown  Godown  @relation(fields: [godownId], references: [godown_id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+  godown       Godown   @relation(fields: [godownId], references: [godown_id], onDelete: Cascade)
+  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@unique([productId, godownId])
 }
 
 model PartyWisePrice {
-  id Int @id @default(autoincrement())
-
+  id        Int     @id @default(autoincrement())
   productId Int
   partyId   Int
-
-  price Decimal @db.Decimal(10, 2)
-
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
-  party   Party   @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  price     Decimal @db.Decimal(10, 2)
+  party     Party   @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@unique([productId, partyId])
 }
 
 model ProductCustomField {
-  id Int @id @default(autoincrement())
-
+  id         Int      @id @default(autoincrement())
   productId  Int
   fieldName  String
   fieldValue String
-
-  createdAt DateTime @default(now())
-
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@index([productId])
 }
 
 model ProductImage {
-  id Int @id @default(autoincrement())
-
+  id        Int     @id @default(autoincrement())
   productId Int
   imageUrl  String
-
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model PartyLedger {
@@ -239,54 +222,42 @@ model Invoice {
   id        Int    @id @default(autoincrement())
   invoiceNo String @unique
 
-  partyId Int
-  party   Party @relation(fields: [partyId], references: [id])
+  quotationId Int?
+  quotation   Quotation? @relation(fields: [quotationId], references: [id])
 
-  branchCode String?
-  branch     Branch? @relation(fields: [branchCode], references: [branch_code])
-
-  invoiceDate DateTime  @default(now())
-  dueDate     DateTime?
-
-  // Top section
-  ewayBillNo     String?
-  challanNo      String?
-  financedBy     String?
-  salesman       String?
-  emailId        String?
-  warrantyPeriod String?
-
-  // Notes
-  notes           String?
-  termsConditions String?
-
-  // Amounts
-  subTotal               Decimal? @db.Decimal(12, 2)
-  taxableAmount          Decimal? @db.Decimal(12, 2)
-  discountAmount         Decimal? @db.Decimal(12, 2)
-  additionalChargesTotal Decimal? @db.Decimal(12, 2)
-  taxAmount              Decimal? @db.Decimal(12, 2)
-  roundOff               Decimal? @db.Decimal(12, 2)
-
-  totalAmount Decimal @db.Decimal(12, 2)
-
-  receivedAmount    Decimal? @db.Decimal(12, 2)
-  outstandingAmount Decimal  @db.Decimal(12, 2)
-
-  paymentMode PaymentMode?
-
-  applyTcs     Boolean @default(false)
-  autoRoundOff Boolean @default(false)
-
-  status InvoiceStatus @default(OPEN)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  items             InvoiceItem[]
-  allocations       PaymentAllocation[]
-  salesReturns      SalesReturn[]
-  additionalCharges InvoiceAdditionalCharge[]
+  partyId                Int
+  subTotal               Decimal?                  @db.Decimal(12, 2)
+  taxAmount              Decimal?                  @db.Decimal(12, 2)
+  totalAmount            Decimal                   @db.Decimal(12, 2)
+  outstandingAmount      Decimal                   @db.Decimal(12, 2)
+  status                 InvoiceStatus             @default(OPEN)
+  createdAt              DateTime                  @default(now())
+  additionalChargesTotal Decimal?                  @db.Decimal(12, 2)
+  applyTcs               Boolean                   @default(false)
+  autoRoundOff           Boolean                   @default(false)
+  branchCode             String?
+  challanNo              String?
+  discountAmount         Decimal?                  @db.Decimal(12, 2)
+  dueDate                DateTime?
+  emailId                String?
+  ewayBillNo             String?
+  financedBy             String?
+  invoiceDate            DateTime                  @default(now())
+  notes                  String?
+  paymentMode            PaymentMode?
+  receivedAmount         Decimal?                  @db.Decimal(12, 2)
+  roundOff               Decimal?                  @db.Decimal(12, 2)
+  salesman               String?
+  taxableAmount          Decimal?                  @db.Decimal(12, 2)
+  termsConditions        String?
+  updatedAt              DateTime                  @updatedAt
+  warrantyPeriod         String?
+  branch                 Branch?                   @relation(fields: [branchCode], references: [branch_code])
+  party                  Party                     @relation(fields: [partyId], references: [id])
+  additionalCharges      InvoiceAdditionalCharge[]
+  items                  InvoiceItem[]
+  allocations            PaymentAllocation[]
+  salesReturns           SalesReturn[]
 
   @@index([partyId])
   @@index([invoiceDate])
@@ -344,29 +315,81 @@ model SalesReturnItem {
 }
 
 model Quotation {
-  id        Int             @id @default(autoincrement())
-  partyId   Int
-  date      DateTime
-  validTill DateTime
-  subtotal  Float
-  discount  Float
-  tax       Float
-  total     Float
-  status    QuotationStatus @default(OPEN)
-  createdAt DateTime        @default(now())
-  updatedAt DateTime        @updatedAt
-  items     QuotationItem[]
+  id Int @id @default(autoincrement())
+
+  quotationNo String @unique
+
+  partyId Int
+  party   Party @relation(fields: [partyId], references: [id])
+
+  branchCode String?
+  branch     Branch? @relation(fields: [branchCode], references: [branch_code])
+
+  quotationDate DateTime  @default(now())
+  validTill     DateTime?
+
+  ewayBillNo     String?
+  challanNo      String?
+  financedBy     String?
+  salesman       String?
+  emailId        String?
+  warrantyPeriod String?
+
+  notes           String?
+  termsConditions String?
+
+  subTotal               Decimal? @db.Decimal(12, 2)
+  taxableAmount          Decimal? @db.Decimal(12, 2)
+  discountAmount         Decimal? @db.Decimal(12, 2)
+  additionalChargesTotal Decimal? @db.Decimal(12, 2)
+  taxAmount              Decimal? @db.Decimal(12, 2)
+  roundOff               Decimal? @db.Decimal(12, 2)
+
+  totalAmount Decimal @db.Decimal(12, 2)
+
+  status QuotationStatus @default(OPEN)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items             QuotationItem[]
+  additionalCharges QuotationAdditionalCharge[]
+
+  invoices Invoice[] // ⭐ required relation
+
+  @@index([partyId])
+  @@index([quotationDate])
 }
 
 model QuotationItem {
-  id          Int       @id @default(autoincrement())
+  id Int @id @default(autoincrement())
+
   quotationId Int
   productId   Int
-  quantity    Int
-  price       Float
-  total       Float
-  product     Product   @relation(fields: [productId], references: [id])
-  quotation   Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+
+  quantity Int
+
+  price Decimal @db.Decimal(10, 2)
+
+  discount Decimal? @db.Decimal(10, 2)
+
+  taxRate   Float?
+  taxAmount Decimal? @db.Decimal(10, 2)
+
+  total Decimal @db.Decimal(10, 2)
+
+  product   Product   @relation(fields: [productId], references: [id])
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+}
+
+model QuotationAdditionalCharge {
+  id Int @id @default(autoincrement())
+
+  quotationId Int
+  name        String
+  amount      Decimal @db.Decimal(10, 2)
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
 }
 
 model ProformaInvoice {
@@ -399,34 +422,25 @@ model ProformaInvoiceItem {
 }
 
 model InvoiceItem {
-  id Int @id @default(autoincrement())
-
+  id        Int      @id @default(autoincrement())
   invoiceId Int
   productId Int
-
-  quantity Int
-
-  price Decimal @db.Decimal(10, 2)
-
-  discount Decimal? @db.Decimal(10, 2)
-
-  taxRate   Float?
+  quantity  Int
+  price     Decimal  @db.Decimal(10, 2)
+  total     Decimal  @db.Decimal(10, 2)
+  discount  Decimal? @db.Decimal(10, 2)
   taxAmount Decimal? @db.Decimal(10, 2)
-
-  total Decimal @db.Decimal(10, 2)
-
-  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  product Product @relation(fields: [productId], references: [id])
+  taxRate   Float?
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id])
 }
 
 model InvoiceAdditionalCharge {
-  id Int @id @default(autoincrement())
-
+  id        Int     @id @default(autoincrement())
   invoiceId Int
   name      String
   amount    Decimal @db.Decimal(10, 2)
-
-  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 }
 
 model PartyBankAccount {
@@ -437,80 +451,62 @@ model PartyBankAccount {
   bankName      String
   ifscCode      String
   branchName    String?
-  upiId         String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
-
-  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  upiId         String?
+  party         Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
 
   @@unique([partyId, accountNumber])
   @@index([partyId])
 }
 
 model PartyCustomField {
-  id         Int    @id @default(autoincrement())
+  id         Int      @id @default(autoincrement())
   partyId    Int
   fieldName  String
   fieldValue String
-
-  createdAt DateTime @default(now())
-
-  party Party @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  party      Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
 
   @@index([partyId])
 }
 
 model PurchaseInvoice {
-  id            Int     @id @default(autoincrement())
-  purchaseInvNo String  @unique // "Purchase Inv No" field (auto-incremented)
-  originalInvNo String? // "Original Inv No" field
-
-  partyId Int // "Bill From" party (Supplier)
-  party   Party @relation(fields: [partyId], references: [id])
-
-  branchCode String?
-  branch     Branch? @relation(fields: [branchCode], references: [branch_code])
-
-  invoiceDate DateTime  @default(now())
-  dueDate     DateTime?
-
-  // Header fields
-  ewayBillNo     String?
-  challanNo      String?
-  financedBy     String?
-  salesman       String?
-  emailId        String?
-  warrantyPeriod String?
-
-  // Notes
-  notes           String?
-  termsConditions String?
-
-  // Amounts
-  subTotal               Decimal? @db.Decimal(12, 2)
-  taxableAmount          Decimal? @db.Decimal(12, 2)
-  discountAmount         Decimal? @db.Decimal(12, 2)
-  additionalChargesTotal Decimal? @db.Decimal(12, 2)
-  taxAmount              Decimal? @db.Decimal(12, 2)
-  roundOff               Decimal? @db.Decimal(12, 2)
-  totalAmount            Decimal  @db.Decimal(12, 2)
-
-  amountPaid    Decimal? @db.Decimal(12, 2)
-  balanceAmount Decimal? @db.Decimal(12, 2)
-
-  paymentMode PaymentMode?
-
-  applyTcs     Boolean @default(false)
-  applyTds     Boolean @default(false) // "Apply TDS" checkbox (visible in screenshot 4)
-  autoRoundOff Boolean @default(false)
-
-  status PurchaseInvoiceStatus @default(OPEN)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  items             PurchaseInvoiceItem[]
-  additionalCharges PurchaseInvoiceAdditionalCharge[]
+  id                     Int                               @id @default(autoincrement())
+  purchaseInvNo          String                            @unique
+  originalInvNo          String?
+  partyId                Int
+  branchCode             String?
+  invoiceDate            DateTime                          @default(now())
+  dueDate                DateTime?
+  ewayBillNo             String?
+  challanNo              String?
+  financedBy             String?
+  salesman               String?
+  emailId                String?
+  warrantyPeriod         String?
+  notes                  String?
+  termsConditions        String?
+  subTotal               Decimal?                          @db.Decimal(12, 2)
+  taxableAmount          Decimal?                          @db.Decimal(12, 2)
+  discountAmount         Decimal?                          @db.Decimal(12, 2)
+  additionalChargesTotal Decimal?                          @db.Decimal(12, 2)
+  taxAmount              Decimal?                          @db.Decimal(12, 2)
+  roundOff               Decimal?                          @db.Decimal(12, 2)
+  totalAmount            Decimal                           @db.Decimal(12, 2)
+  amountPaid             Decimal?                          @db.Decimal(12, 2)
+  balanceAmount          Decimal?                          @db.Decimal(12, 2)
+  paymentMode            PaymentMode?
+  applyTcs               Boolean                           @default(false)
+  applyTds               Boolean                           @default(false)
+  autoRoundOff           Boolean                           @default(false)
+  status                 PurchaseInvoiceStatus             @default(OPEN)
+  createdAt              DateTime                          @default(now())
+  updatedAt              DateTime                          @updatedAt
+  branch                 Branch?                           @relation(fields: [branchCode], references: [branch_code])
+  party                  Party                             @relation(fields: [partyId], references: [id])
+  additionalCharges      PurchaseInvoiceAdditionalCharge[]
+  items                  PurchaseInvoiceItem[]
 
   @@index([partyId])
   @@index([invoiceDate])
@@ -518,29 +514,27 @@ model PurchaseInvoice {
 }
 
 model PurchaseInvoiceItem {
-  id                Int      @id @default(autoincrement())
+  id                Int             @id @default(autoincrement())
   purchaseInvoiceId Int
   productId         Int
-  godownId          Int?
-  hsnSac            String? // HSN/SAC column in UI
-  quantity          Decimal  @db.Decimal(10, 3)
-  price             Decimal  @db.Decimal(10, 2) // Price/Item (purchase price)
-  discount          Decimal? @db.Decimal(10, 2)
+  hsnSac            String?
+  quantity          Decimal         @db.Decimal(10, 3)
+  price             Decimal         @db.Decimal(10, 2)
+  discount          Decimal?        @db.Decimal(10, 2)
   taxRate           Float?
-  taxAmount         Decimal? @db.Decimal(10, 2)
-  total             Decimal  @db.Decimal(10, 2)
-
-  purchaseInvoice PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
-  product         Product         @relation(fields: [productId], references: [id])
+  taxAmount         Decimal?        @db.Decimal(10, 2)
+  total             Decimal         @db.Decimal(10, 2)
+  godownId          Int?
+  product           Product         @relation(fields: [productId], references: [id])
+  purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
 }
 
 model PurchaseInvoiceAdditionalCharge {
-  id                Int     @id @default(autoincrement())
+  id                Int             @id @default(autoincrement())
   purchaseInvoiceId Int
   name              String
-  amount            Decimal @db.Decimal(10, 2)
-
-  purchaseInvoice PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
+  amount            Decimal         @db.Decimal(10, 2)
+  purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
 }
 
 enum PurchaseInvoiceStatus {
@@ -573,10 +567,10 @@ enum BalanceType {
 
 enum LedgerRefType {
   Invoice
-  PurchaseInvoice
   Return
   Opening
   Payment
+  PurchaseInvoice
 }
 
 enum PaymentMode {
