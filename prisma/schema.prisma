@@ -15,6 +15,7 @@ model Branch {
   status      Status    @default(active)
   users       User[]
   invoices    Invoice[]
+  purchaseInvoices  PurchaseInvoice[]
 }
 
 model User {
@@ -72,6 +73,7 @@ model Party {
   bankAccounts       PartyBankAccount[]
   customFields       PartyCustomField[]
   partyPrices        PartyWisePrice[]
+  purchaseInvoices   PurchaseInvoice[]
 }
 
 model Product {
@@ -114,6 +116,7 @@ model Product {
   partyPrices        PartyWisePrice[]
   images             ProductImage[]
   ProductCustomField ProductCustomField[]
+  purchaseInvoiceItems  PurchaseInvoiceItem[]
 }
 
 model Category {
@@ -456,6 +459,96 @@ model PartyCustomField {
   @@index([partyId])
 }
 
+model PurchaseInvoice {
+  id                Int      @id @default(autoincrement())
+  purchaseInvNo     String   @unique   // "Purchase Inv No" field (auto-incremented)
+  originalInvNo     String?            // "Original Inv No" field
+
+  partyId           Int                // "Bill From" party (Supplier)
+  party             Party   @relation(fields: [partyId], references: [id])
+
+  branchCode        String?
+  branch            Branch? @relation(fields: [branchCode], references: [branch_code])
+
+  invoiceDate       DateTime @default(now())
+  dueDate           DateTime?
+
+  // Header fields
+  ewayBillNo        String?
+  challanNo         String?
+  financedBy        String?
+  salesman          String?
+  emailId           String?
+  warrantyPeriod    String?
+
+  // Notes
+  notes             String?
+  termsConditions   String?
+
+  // Amounts
+  subTotal                Decimal? @db.Decimal(12, 2)
+  taxableAmount           Decimal? @db.Decimal(12, 2)
+  discountAmount          Decimal? @db.Decimal(12, 2)
+  additionalChargesTotal  Decimal? @db.Decimal(12, 2)
+  taxAmount               Decimal? @db.Decimal(12, 2)
+  roundOff                Decimal? @db.Decimal(12, 2)
+  totalAmount             Decimal  @db.Decimal(12, 2)
+
+  amountPaid        Decimal? @db.Decimal(12, 2)
+  balanceAmount     Decimal? @db.Decimal(12, 2)
+
+  paymentMode       PaymentMode?
+
+  applyTcs          Boolean @default(false)
+  applyTds          Boolean @default(false)   // "Apply TDS" checkbox (visible in screenshot 4)
+  autoRoundOff      Boolean @default(false)
+
+  status            PurchaseInvoiceStatus @default(OPEN)
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  items             PurchaseInvoiceItem[]
+  additionalCharges PurchaseInvoiceAdditionalCharge[]
+
+  @@index([partyId])
+  @@index([invoiceDate])
+  @@index([branchCode])
+}
+
+model PurchaseInvoiceItem {
+  id                Int              @id @default(autoincrement())
+  purchaseInvoiceId Int
+  productId         Int
+  godownId          Int?
+  hsnSac            String?          // HSN/SAC column in UI
+  quantity          Decimal          @db.Decimal(10, 3)
+  price             Decimal          @db.Decimal(10, 2)   // Price/Item (purchase price)
+  discount          Decimal?         @db.Decimal(10, 2)
+  taxRate           Float?
+  taxAmount         Decimal?         @db.Decimal(10, 2)
+  total             Decimal          @db.Decimal(10, 2)
+
+  purchaseInvoice   PurchaseInvoice  @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
+  product           Product          @relation(fields: [productId], references: [id])
+}
+
+model PurchaseInvoiceAdditionalCharge {
+  id                Int             @id @default(autoincrement())
+  purchaseInvoiceId Int
+  name              String
+  amount            Decimal         @db.Decimal(10, 2)
+
+  purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
+}
+
+enum PurchaseInvoiceStatus {
+  OPEN
+  PARTIAL
+  PAID
+  CANCELLED
+}
+
 enum Role {
   Admin
   Cashier
@@ -479,6 +572,7 @@ enum BalanceType {
 
 enum LedgerRefType {
   Invoice
+  PurchaseInvoice
   Return
   Opening
   Payment

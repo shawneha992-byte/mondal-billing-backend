@@ -11,6 +11,7 @@ import transactionRoutes from "./transaction.routes";
 import partyExtraRoutes from "./partyExtra.routes";
 import categoryRoutes from "./category.routes";
 import godownRoutes from "./godown.routes";
+import purchaseInvoiceRoutes from "./Purcahseinvoice.routes";
 const router = Router();
 
 router.use("/auth", authRoutes);
@@ -24,4 +25,5 @@ router.use("/transactions", transactionRoutes);
 router.use("/", partyExtraRoutes);
 router.use("/categories", categoryRoutes);
 router.use("/godowns", godownRoutes);
+router.use("/purchase-invoices", purchaseInvoiceRoutes);
 export default router;
