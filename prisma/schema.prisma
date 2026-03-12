@@ -13,11 +13,11 @@ model Branch {
   branch_code       String              @unique
   address           String?
   status            Status              @default(active)
+  users             User[]
   invoices          Invoice[]
   purchaseInvoices  PurchaseInvoice[]
   quotations        Quotation[]
   quotationSettings QuotationSettings[]
-  users             User[]
 }
 
 model User {
@@ -114,6 +114,7 @@ model Product {
   purchaseInvoiceItems PurchaseInvoiceItem[]
   quotationItems       QuotationItem[]
   salesReturnItems     SalesReturnItem[]
+  stockLedger          StockLedger[]
 }
 
 model Category {
@@ -131,6 +132,7 @@ model Godown {
   pincode        String?
   created_at     DateTime       @default(now())
   stocks         ProductStock[]
+  stockLedger    StockLedger[]
 }
 
 model ProductStock {
@@ -145,6 +147,33 @@ model ProductStock {
   product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@unique([productId, godownId])
+}
+
+model StockLedger {
+  id Int @id @default(autoincrement())
+
+  productId Int
+  godownId  Int?
+
+  date DateTime @default(now())
+
+  refType StockRefType
+  refId   Int?
+
+  quantityIn  Int?
+  quantityOut Int?
+
+  balance Int
+
+  remarks String?
+
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id])
+  godown  Godown? @relation(fields: [godownId], references: [godown_id])
+
+  @@index([productId])
+  @@index([date])
 }
 
 model PartyWisePrice {
@@ -657,4 +686,13 @@ enum ProformaStatus {
 enum ItemType {
   Product
   Service
+}
+
+enum StockRefType {
+  OPENING
+  PURCHASE
+  SALE
+  SALES_RETURN
+  PURCHASE_RETURN
+  ADJUSTMENT
 }
