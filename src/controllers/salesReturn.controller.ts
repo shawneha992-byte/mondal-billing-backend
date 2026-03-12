@@ -1,150 +1,177 @@
+/**
+ * salesReturn.controller.ts
+ * ─────────────────────────────────────────────────────────────
+ * Sales Return = customer returns items → stock comes back IN.
+ * Writes StockRefType.SALES_RETURN ledger entry.
+ * On delete → reverses the entry (stock goes back OUT).
+ *
+ * Route file: salesReturn.routes.ts  (already registered in index.ts)
+ */
+
 import { Request, Response } from "express";
 import prisma from "../utils/prisma";
-import { InvoiceStatus, LedgerRefType, LedgerType } from "@prisma/client";
+import { StockRefType, LedgerRefType, LedgerType } from "@prisma/client";
+import { writeStockLedger, reverseStockLedger } from "../services/stockLedger.service";
 
-/**
- * ======================================================
- * CREATE SALES RETURN
- * POST /api/sales-return
- * ======================================================
- */
+/* ═══════════════════════════════════════════════════════════
+   CREATE SALES RETURN
+   POST /api/sales-return/sales-return
+═══════════════════════════════════════════════════════════ */
 export const createSalesReturn = async (req: Request, res: Response) => {
   try {
-    const { invoiceId, partyId, items } = req.body;
+    const { invoiceId, partyId, items = [], reason } = req.body;
 
-    if (!invoiceId || !partyId || !items || items.length === 0) {
+    if (!invoiceId || !partyId || !items.length) {
       return res.status(400).json({
         success: false,
-        message: "invoiceId, partyId and items are required"
+        message: "invoiceId, partyId and items are required",
       });
     }
 
-    // 🔹 Calculate total return amount from items
-    const totalAmount = items.reduce(
-      (sum: number, item: any) => sum + item.quantity * item.price,
-      0
-    );
-
     const result = await prisma.$transaction(async (tx) => {
 
-      // 1️⃣ Fetch invoice
+      // Validate the source invoice
       const invoice = await tx.invoice.findUnique({
-        where: { id: Number(invoiceId) }
+        where:   { id: Number(invoiceId) },
+        include: { items: true },
       });
+      if (!invoice) throw new Error("Invoice not found");
 
-      if (!invoice) {
-        throw new Error("Invoice not found");
-      }
+      // Compute return total
+      const totalAmount = items.reduce(
+        (s: number, i: any) => s + Number(i.price) * Number(i.quantity), 0
+      );
 
-      const outstanding = Number(invoice.outstandingAmount ?? 0);
-
-      // 2️⃣ Validate return amount
-      if (totalAmount > outstanding) {
-        throw new Error("Return amount cannot exceed outstanding amount");
-      }
-
-      // 3️⃣ Create Sales Return
+      // Create SalesReturn record
       const salesReturn = await tx.salesReturn.create({
         data: {
-          invoiceId,
-          partyId,
+          invoiceId:   Number(invoiceId),
+          partyId:     Number(partyId),
           totalAmount,
           items: {
-            create: items.map((item: any) => ({
-              productId: item.productId,
-              quantity: item.quantity,
-              price: item.price
-            }))
-          }
-        }
+            create: items.map((i: any) => ({
+              productId: Number(i.productId),
+              quantity:  Number(i.quantity),
+              price:     Number(i.price),
+            })),
+          },
+        },
+        include: { items: true },
       });
 
-      // 4️⃣ Calculate new outstanding & status
-      const newOutstanding = outstanding - totalAmount;
+      // ── STOCK IN — returned items go back into stock ───────
+      for (const item of salesReturn.items) {
+        const product = await tx.product.findUnique({ where: { id: item.productId } });
+        if (product?.itemType !== "Product") continue;
 
-      let newStatus: InvoiceStatus = InvoiceStatus.OPEN;
-      if (newOutstanding === 0) {
-        newStatus = InvoiceStatus.PAID;
-      } else if (newOutstanding < Number(invoice.totalAmount)) {
-        newStatus = InvoiceStatus.PARTIAL;
+        // Use same godown as the original invoice item where possible
+        const originalItem = await tx.invoiceItem.findFirst({
+          where: { invoiceId: Number(invoiceId), productId: item.productId },
+        });
+
+        await writeStockLedger({
+          tx,
+          productId:  item.productId,
+          godownId:   (originalItem as any)?.godownId ?? null,
+          refType:    StockRefType.SALES_RETURN,
+          refId:      salesReturn.id,
+          quantityIn: item.quantity,
+          remarks:    `Sales Return — ${invoice.invoiceNo}`,
+          date:       new Date(),
+        });
       }
 
-      // 5️⃣ Update invoice
-      await tx.invoice.update({
-        where: { id: invoice.id },
-        data: {
-          outstandingAmount: newOutstanding,
-          status: newStatus
-        }
-      });
-
-      // 6️⃣ Get last ledger balance
-      const lastLedger = await tx.partyLedger.findFirst({
-        where: { partyId },
-        orderBy: { id: "desc" }
-      });
-
-      const lastBalance = Number(lastLedger?.balance ?? 0);
-      const newBalance = lastBalance - totalAmount;
-
-      // 7️⃣ Party Ledger entry (CREDIT)
+      // ── Party Ledger CREDIT — reduce what party owes ───────
+      const lastBalance = await getLastPartyBalance(tx, Number(partyId));
       await tx.partyLedger.create({
         data: {
-          partyId,
-
-          refType: LedgerRefType.Return,
-          refId: invoice.id,
-
-          type: LedgerType.CREDIT,
-          debit: null,
-          credit: totalAmount,
-
-          balance: newBalance
-        }
+          partyId:   Number(partyId),
+          refType:   LedgerRefType.Return,
+          refId:     salesReturn.id,
+          reference: `RET-${salesReturn.id}`,
+          type:      LedgerType.CREDIT,
+          credit:    totalAmount,
+          debit:     null,
+          balance:   lastBalance - totalAmount,
+        },
       });
 
       return salesReturn;
     });
 
-    return res.status(201).json({
-      success: true,
-      message: "Sales return processed successfully",
-      data: result
-    });
-
+    return res.status(201).json({ success: true, message: "Sales return created", data: result });
   } catch (error: any) {
-    console.error("❌ Sales Return Error:", error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || "Failed to process sales return"
-    });
+    console.error("❌ createSalesReturn:", error);
+    return res.status(400).json({ success: false, message: error.message });
   }
 };
 
-/**
- * ======================================================
- * GET SALES RETURNS
- * GET /api/sales-return
- * ======================================================
- */
-export const getSalesReturns = async (_req: Request, res: Response) => {
+/* ═══════════════════════════════════════════════════════════
+   GET ALL SALES RETURNS
+   GET /api/sales-return/sales-return
+═══════════════════════════════════════════════════════════ */
+export const getSalesReturns = async (req: Request, res: Response) => {
   try {
-    const data = await prisma.salesReturn.findMany({
+    const { partyId, invoiceId } = req.query;
+    const where: any = {};
+    if (partyId)   where.partyId   = Number(partyId);
+    if (invoiceId) where.invoiceId = Number(invoiceId);
+
+    const returns = await prisma.salesReturn.findMany({
+      where,
       include: {
-        invoice: true,
-        party: true,
-        items: true
-      }
+        party:   { select: { id: true, partyName: true } },
+        invoice: { select: { id: true, invoiceNo: true } },
+        items:   { include: { product: { select: { id: true, name: true, unit: true } } } },
+      },
+      orderBy: { createdAt: "desc" },
     });
 
-    return res.json({
-      success: true,
-      data
-    });
+    return res.json({ success: true, data: returns });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch sales returns"
-    });
+    return res.status(500).json({ success: false, message: "Failed to fetch sales returns" });
   }
 };
+
+/* ═══════════════════════════════════════════════════════════
+   DELETE SALES RETURN  (reverses stock correction)
+   DELETE /api/sales-return/:id  ← add this route if needed
+═══════════════════════════════════════════════════════════ */
+export const deleteSalesReturn = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+
+    await prisma.$transaction(async (tx) => {
+      const ret = await tx.salesReturn.findUnique({ where: { id } });
+      if (!ret) throw new Error("Sales return not found");
+
+      // ✅ Reverse stock — returned items go back OUT
+      await reverseStockLedger(tx, StockRefType.SALES_RETURN, id);
+
+      // Reverse party ledger credit
+      await tx.partyLedger.deleteMany({
+        where: { refType: LedgerRefType.Return, refId: id },
+      });
+
+      await tx.salesReturnItem.deleteMany({ where: { salesReturnId: id } });
+      await tx.salesReturn.delete({ where: { id } });
+    });
+
+    return res.json({ success: true, message: "Sales return deleted" });
+  } catch (error: any) {
+    console.error("❌ deleteSalesReturn:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/* ─────────────────────────────────────────────
+   HELPER — last party ledger balance
+───────────────────────────────────────────── */
+async function getLastPartyBalance(tx: any, partyId: number): Promise<number> {
+  const last = await tx.partyLedger.findFirst({
+    where:   { partyId },
+    orderBy: { createdAt: "desc" },
+    select:  { balance: true },
+  });
+  return last ? Number(last.balance) : 0;
+}

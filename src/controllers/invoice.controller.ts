@@ -1,7 +1,8 @@
 import { Request, Response } from "express";
 import prisma from "../utils/prisma";
-import { InvoiceStatus, LedgerRefType, LedgerType } from "@prisma/client";
+import { InvoiceStatus, LedgerRefType, LedgerType, StockRefType } from "@prisma/client";
 import { getLastPartyBalanceTx } from "../services/ledger.service";
+import { writeStockLedger, reverseStockLedger } from "../services/stockLedger.service";
 
 
 /* ═══════════════════════════════════════════════════════════
@@ -24,7 +25,7 @@ export const createInvoice = async (req: Request, res: Response) => {
     invoiceDate,
     dueDate,
     items              = [],
-    additionalCharges  = [],   // [{ name, amount }]
+    additionalCharges  = [],
     discountAmount     = 0,
     roundOff           = 0,
     paymentMode,
@@ -39,12 +40,10 @@ export const createInvoice = async (req: Request, res: Response) => {
     warrantyPeriod,
     applyTcs           = false,
     autoRoundOff       = false,
-    // Pre-computed totals from frontend (trusted — frontend mirrors our formula)
-    totalAmount:       payloadTotal,
-    taxAmount:         payloadTax,
-    tcsAmount:         payloadTcs        = 0,
-    outstandingAmount: payloadOutstanding,
-    subTotal:          payloadSubTotal,
+    totalAmount:            payloadTotal,
+    taxAmount:              payloadTax,
+    tcsAmount:              payloadTcs   = 0,
+    outstandingAmount:      payloadOutstanding,
     additionalChargesTotal: payloadChargesTotal,
   } = req.body;
 
@@ -60,34 +59,25 @@ export const createInvoice = async (req: Request, res: Response) => {
       let taxAmount = 0;
 
       for (const item of items) {
-        const product = await tx.product.findUnique({
-          where: { id: item.productId }
-        });
-
-        if (!product) {
-          throw new Error(`Product not found (ID: ${item.productId})`);
-        }
+        const product = await tx.product.findUnique({ where: { id: item.productId } });
+        if (!product) throw new Error(`Product not found (ID: ${item.productId})`);
 
         if (product.itemType === "Product") {
           const stock = item.godownId
             ? await tx.productStock.findUnique({
-                where: {
-                  productId_godownId: {
-                    productId: item.productId,
-                    godownId: item.godownId
-                  }
-                }
+                where: { productId_godownId: { productId: item.productId, godownId: item.godownId } },
               })
-            : await tx.productStock.findFirst({
-                where: { productId: item.productId }
-              });
+            : await tx.productStock.findFirst({ where: { productId: item.productId } });
 
-          if (!stock || stock.openingStock < item.quantity) {
-            throw new Error(`Insufficient stock for "${product.name}"`);
+          // ✅ FIX: use currentStock (live balance) not openingStock (original entry only)
+          const availableQty = stock ? (stock.currentStock ?? stock.openingStock) : 0;
+          if (!stock || availableQty < item.quantity) {
+            throw new Error(
+              `Insufficient stock for "${product.name}" (available: ${availableQty}, requested: ${item.quantity})`
+            );
           }
         }
 
-        // ── Accumulate line totals ──────────────────────────
         const lineBase    = (item.price    ?? 0) * (item.quantity ?? 0);
         const lineDisc    = item.discount  ?? 0;
         const lineTaxable = lineBase - lineDisc;
@@ -95,60 +85,59 @@ export const createInvoice = async (req: Request, res: Response) => {
         taxAmount += lineTaxable * ((item.taxRate ?? 0) / 100);
       }
 
-      // ── 2. Totals — use frontend pre-computed values (they mirror our formula) ──
-      // Fall back to server-side calculation if frontend didn't send them.
+      // ── 2. Totals ─────────────────────────────────────────
       const additionalChargesTotal: number = payloadChargesTotal
-        ?? additionalCharges.reduce((sum: number, c: { name: string; amount: number }) => sum + (c.amount ?? 0), 0);
+        ?? additionalCharges.reduce(
+             (sum: number, c: { name: string; amount: number }) => sum + (c.amount ?? 0), 0
+           );
 
-      const taxableAmount     = subTotal + additionalChargesTotal - discountAmount;
-      const taxAmount_final   = payloadTax         ?? taxAmount;
-      const tcsAmount_final   = payloadTcs         ?? 0;
-      const totalAmount       = payloadTotal
+      const taxableAmount   = subTotal + additionalChargesTotal - discountAmount;
+      const taxAmount_final = payloadTax ?? taxAmount;
+      const tcsAmount_final = payloadTcs ?? 0;
+      const totalAmount     = payloadTotal
         ?? Math.round((taxableAmount + taxAmount_final + tcsAmount_final + roundOff) * 100) / 100;
       const outstandingAmount = payloadOutstanding
         ?? Math.max(0, Math.round((totalAmount - receivedAmount) * 100) / 100);
 
-      // ── 3. Invoice number (safe: uses MAX numeric suffix, not count) ──────
-      // Sort by id desc (always reliable) to get the latest invoice
-      const lastInvoice = await tx.invoice.findFirst({
-        orderBy: { id: "desc" },
-        select:  { invoiceNo: true },
-      });
-      // Extract highest numeric suffix across ALL invoices to handle deletions/gaps
-      const allNos = await tx.invoice.findMany({ select: { invoiceNo: true } });
-      let maxSeq = 0;
+      // ── 3. Invoice number ─────────────────────────────────
+      const settings  = await tx.invoiceSettings.findFirst({ orderBy: { id: "asc" } });
+      const usePrefix = settings?.enablePrefix ?? false;
+const prefix = usePrefix && settings?.prefix ? settings.prefix : "INV-";      const allNos    = await tx.invoice.findMany({ select: { invoiceNo: true } });
+      let maxSeq      = (settings?.sequenceNumber ?? 1) - 1;
       for (const inv of allNos) {
-        const m = inv.invoiceNo?.match(/(\d+)$/);
+        if (!inv.invoiceNo.startsWith(prefix)) continue;
+        const m = inv.invoiceNo.slice(prefix.length).match(/^(\d+)$/);
         if (m) maxSeq = Math.max(maxSeq, parseInt(m[1], 10));
       }
-      let nextSeq = maxSeq + 1;
-      // Safety loop — skip any that somehow still exist
-      let invoiceNo = `INV-${String(nextSeq).padStart(5, "0")}`;
+      let nextSeq   = maxSeq + 1;
+      let invoiceNo = `${prefix}${String(nextSeq).padStart(5, "0")}`;
       while (await tx.invoice.findUnique({ where: { invoiceNo } })) {
         nextSeq++;
-        invoiceNo = `INV-${String(nextSeq).padStart(5, "0")}`;
+        invoiceNo = `${prefix}${String(nextSeq).padStart(5, "0")}`;
+      }
+      if (settings) {
+        await tx.invoiceSettings.update({
+          where: { id: settings.id },
+          data:  { sequenceNumber: nextSeq + 1 },
+        });
       }
 
       // ── 4. Persist invoice ────────────────────────────────
-      // `as any` because the generated Prisma client may be behind the schema.
-      // Fix: run `npx prisma db push && npx prisma generate`
       const created = await (tx.invoice.create as any)({
         data: {
           invoiceNo,
-          partyId,                                            // scalar FK
-          branchCode:  branchCode ?? null,                   // scalar FK
-          invoiceDate: invoiceDate ? new Date(invoiceDate) : new Date(),
-          dueDate:     dueDate    ? new Date(dueDate)     : null,
-
-          ewayBillNo:     ewayBillNo     ?? null,
-          challanNo:      challanNo      ?? null,
-          financedBy:     financedBy     ?? null,
-          salesman:       salesman       ?? null,
-          emailId:        emailId        ?? null,
-          warrantyPeriod: warrantyPeriod ?? null,
-          notes:          notes          ?? null,
+          partyId,
+          branchCode:      branchCode     ?? null,
+          invoiceDate:     invoiceDate    ? new Date(invoiceDate) : new Date(),
+          dueDate:         dueDate        ? new Date(dueDate)     : null,
+          ewayBillNo:      ewayBillNo     ?? null,
+          challanNo:       challanNo      ?? null,
+          financedBy:      financedBy     ?? null,
+          salesman:        salesman       ?? null,
+          emailId:         emailId        ?? null,
+          warrantyPeriod:  warrantyPeriod ?? null,
+          notes:           notes          ?? null,
           termsConditions: termsConditions ?? null,
-
           subTotal,
           taxableAmount,
           discountAmount,
@@ -158,11 +147,10 @@ export const createInvoice = async (req: Request, res: Response) => {
           totalAmount,
           receivedAmount,
           outstandingAmount,
-          paymentMode: paymentMode ?? null,
+          paymentMode:  paymentMode ?? null,
           applyTcs,
           autoRoundOff,
           status: deriveStatus(receivedAmount, totalAmount),
-
           items: {
             create: items.map((item: any) => {
               const lineBase    = (item.price    ?? 0) * (item.quantity ?? 0);
@@ -174,13 +162,12 @@ export const createInvoice = async (req: Request, res: Response) => {
                 quantity:  item.quantity,
                 price:     item.price,
                 discount:  lineDisc,
-                taxRate:   item.taxRate   ?? 0,
+                taxRate:   item.taxRate  ?? 0,
                 taxAmount: lineTax,
-                total:     lineTaxable,   // taxable line amount (excl. tax)
+                total:     lineTaxable,
               };
             }),
           },
-
           ...(additionalCharges.length > 0 && {
             additionalCharges: {
               create: additionalCharges.map((c: { name: string; amount: number }) => ({
@@ -192,39 +179,25 @@ export const createInvoice = async (req: Request, res: Response) => {
         },
       });
 
-      // ── 5. Reduce stock ───────────────────────────────────
+      // ── 5. STOCK OUT — deduct stock + write StockLedger ───
       for (const item of items) {
-  const product = await tx.product.findUnique({
-    where: { id: item.productId }
-  });
+        const product = await tx.product.findUnique({ where: { id: item.productId } });
+        if (product?.itemType !== "Product") continue;
 
-  if (product?.itemType !== "Product") continue;
-
-  const stock = item.godownId
-    ? await tx.productStock.findUnique({
-        where: {
-          productId_godownId: {
-            productId: item.productId,
-            godownId: item.godownId
-          }
-        }
-      })
-    : await tx.productStock.findFirst({
-        where: { productId: item.productId }
-      });
-
-  if (stock) {
-    await tx.productStock.update({
-      where: { id: stock.id },
-      data: {
-        openingStock: { decrement: item.quantity }
+        await writeStockLedger({
+          tx,
+          productId:   item.productId,
+          godownId:    item.godownId ?? null,
+          refType:     StockRefType.SALE,
+          refId:       created.id,
+          quantityOut: item.quantity,
+          remarks:     `Sale — ${created.invoiceNo}`,
+          date:        invoiceDate ? new Date(invoiceDate) : new Date(),
+        });
       }
-    });
-  }
-}
-      // ── 6. Ledger DEBIT — full invoice amount ─────────────
-      const balanceAfterDebit = (await getLastPartyBalanceTx(tx, partyId)) + totalAmount;
 
+      // ── 6. Party Ledger DEBIT ─────────────────────────────
+      const balanceAfterDebit = (await getLastPartyBalanceTx(tx, partyId)) + totalAmount;
       await tx.partyLedger.create({
         data: {
           partyId,
@@ -255,14 +228,9 @@ export const createInvoice = async (req: Request, res: Response) => {
       }
 
       return created;
-    }); // closes $transaction
-
-
-    return res.status(201).json({
-      success: true,
-      message: "Invoice created successfully",
-      data: invoice,
     });
+
+    return res.status(201).json({ success: true, message: "Invoice created successfully", data: invoice });
   } catch (error: any) {
     console.error("❌ Create Invoice Error:", error);
     return res.status(400).json({ success: false, message: error.message });
@@ -273,20 +241,73 @@ export const createInvoice = async (req: Request, res: Response) => {
    GET ALL INVOICES
    GET /api/invoices
 ═══════════════════════════════════════════════════════════ */
-export const getInvoices = async (_req: Request, res: Response) => {
+export const getInvoices = async (req: Request, res: Response) => {
   try {
-    const invoices = await (prisma.invoice.findMany as any)({
-      include: {
-        party:             true,
-        items:             { include: { product: true } },
-        additionalCharges: true,
-        allocations:       true,
-        salesReturns:      true,
-      },
-      orderBy: { createdAt: "desc" },
-    });
+    const {
+      status,
+      from,
+      to,
+      search,
+      page      = "1",
+      limit     = "50",
+      sortField = "invoiceDate",
+      sortDir   = "desc",
+    } = req.query as Record<string, string>;
 
-    return res.json({ success: true, data: invoices });
+    // ── WHERE clause ─────────────────────────────────────
+    const where: any = {};
+
+    // Status filter — frontend sends "PAID", "OPEN,PARTIAL", or "CANCELLED"
+    if (status) {
+      const statuses = status.split(",").map(s => s.trim()).filter(Boolean);
+      where.status = statuses.length === 1
+        ? statuses[0]
+        : { in: statuses };
+    }
+
+    // Date range — filter on invoiceDate
+    if (from || to) {
+      where.invoiceDate = {};
+      if (from) where.invoiceDate.gte = new Date(from);
+      if (to)   where.invoiceDate.lte = new Date(to + "T23:59:59.999Z");
+    }
+
+    // Search — invoice number OR party name (case-insensitive)
+    if (search && search.trim()) {
+      where.OR = [
+        { invoiceNo: { contains: search.trim(), mode: "insensitive" } },
+        { party: { name: { contains: search.trim(), mode: "insensitive" } } },
+      ];
+    }
+
+    // ── Pagination ────────────────────────────────────────
+    const pageNum  = Math.max(1, parseInt(page,  10) || 1);
+    const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 50));
+    const skip     = (pageNum - 1) * limitNum;
+
+    // ── Sort ──────────────────────────────────────────────
+    const orderByField = sortField === "amount" ? "totalAmount" : "invoiceDate";
+    const orderByDir   = sortDir === "asc" ? "asc" : "desc";
+
+    // ── Query ─────────────────────────────────────────────
+    const [invoices, total] = await Promise.all([
+      (prisma.invoice.findMany as any)({
+        where,
+        include: {
+          party:             true,
+          items:             { include: { product: true } },
+          additionalCharges: true,
+          allocations:       true,
+          salesReturns:      true,
+        },
+        orderBy: { [orderByField]: orderByDir },
+        skip,
+        take: limitNum,
+      }),
+      prisma.invoice.count({ where }),
+    ]);
+
+    return res.json({ success: true, data: invoices, total, page: pageNum });
   } catch (error) {
     console.error("❌ Fetch Invoices Error:", error);
     return res.status(500).json({ success: false, message: "Failed to fetch invoices" });
@@ -300,10 +321,9 @@ export const getInvoices = async (_req: Request, res: Response) => {
 export const getInvoiceById = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
-
   try {
     const invoice = await (prisma.invoice.findUnique as any)({
-      where: { id },
+      where:   { id },
       include: {
         party:             true,
         items:             { include: { product: true } },
@@ -312,9 +332,7 @@ export const getInvoiceById = async (req: Request, res: Response) => {
         salesReturns:      true,
       },
     });
-
     if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found" });
-
     return res.json({ success: true, data: invoice });
   } catch (error) {
     console.error("❌ Fetch Invoice Error:", error);
@@ -323,7 +341,7 @@ export const getInvoiceById = async (req: Request, res: Response) => {
 };
 
 /* ═══════════════════════════════════════════════════════════
-   UPDATE INVOICE  (non-financial meta fields only)
+   UPDATE INVOICE  (meta fields only)
    PUT /api/invoices/:id
 ═══════════════════════════════════════════════════════════ */
 export const updateInvoice = async (req: Request, res: Response) => {
@@ -332,8 +350,7 @@ export const updateInvoice = async (req: Request, res: Response) => {
 
   const {
     dueDate, ewayBillNo, challanNo, financedBy,
-    salesman, emailId, warrantyPeriod,
-    notes, termsConditions,
+    salesman, emailId, warrantyPeriod, notes, termsConditions,
   } = req.body;
 
   try {
@@ -346,14 +363,14 @@ export const updateInvoice = async (req: Request, res: Response) => {
     const updated = await (prisma.invoice.update as any)({
       where: { id },
       data: {
-        dueDate:         dueDate ? new Date(dueDate) : undefined,
-        ewayBillNo:      ewayBillNo      ?? undefined,
-        challanNo:       challanNo       ?? undefined,
-        financedBy:      financedBy      ?? undefined,
-        salesman:        salesman        ?? undefined,
-        emailId:         emailId         ?? undefined,
-        warrantyPeriod:  warrantyPeriod  ?? undefined,
-        notes:           notes           ?? undefined,
+        dueDate:         dueDate        ? new Date(dueDate) : undefined,
+        ewayBillNo:      ewayBillNo     ?? undefined,
+        challanNo:       challanNo      ?? undefined,
+        financedBy:      financedBy     ?? undefined,
+        salesman:        salesman       ?? undefined,
+        emailId:         emailId        ?? undefined,
+        warrantyPeriod:  warrantyPeriod ?? undefined,
+        notes:           notes          ?? undefined,
         termsConditions: termsConditions ?? undefined,
       },
     });
@@ -375,28 +392,16 @@ export const cancelInvoice = async (req: Request, res: Response) => {
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const invoice = await tx.invoice.findUnique({
-        where:   { id },
-        include: { items: true },
-      });
+      const invoice = await tx.invoice.findUnique({ where: { id }, include: { items: true } });
 
       if (!invoice)                                   throw new Error("Invoice not found");
       if (invoice.status === InvoiceStatus.CANCELLED) throw new Error("Invoice is already cancelled");
 
-      // Restore stock
-      for (const item of invoice.items) {
-        const stock = await tx.productStock.findFirst({ where: { productId: item.productId } });
-        if (stock) {
-          await tx.productStock.update({
-            where: { id: stock.id },
-            data:  { openingStock: { increment: item.quantity } },
-          });
-        }
-      }
+      // ✅ Reverse stock — sold items come back IN
+      await reverseStockLedger(tx, StockRefType.SALE, id);
 
-      // Reversal ledger entry
+      // Party ledger CREDIT reversal
       const newBalance = (await getLastPartyBalanceTx(tx, invoice.partyId)) - invoice.totalAmount.toNumber();
-
       await tx.partyLedger.create({
         data: {
           partyId:   invoice.partyId,
@@ -410,10 +415,7 @@ export const cancelInvoice = async (req: Request, res: Response) => {
         },
       });
 
-      return tx.invoice.update({
-        where: { id },
-        data:  { status: InvoiceStatus.CANCELLED },
-      });
+      return tx.invoice.update({ where: { id }, data: { status: InvoiceStatus.CANCELLED } });
     });
 
     return res.json({ success: true, message: "Invoice cancelled", data: result });
@@ -426,27 +428,16 @@ export const cancelInvoice = async (req: Request, res: Response) => {
 /* ═══════════════════════════════════════════════════════════
    RECORD PAYMENT ON INVOICE
    PATCH /api/invoices/:id/payment
-   body: { amount, paymentMode }
 ═══════════════════════════════════════════════════════════ */
 export const recordInvoicePayment = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
 
-  const {
-    amount,
-    paymentMode,
-    paymentDate,
-    discount    = 0,
-    notes,
-    applyTds    = false,
-    tdsAmount   = 0,
-  } = req.body;
-
+  const { amount, paymentMode, discount = 0 } = req.body;
   if (!amount || amount <= 0) return res.status(400).json({ success: false, message: "Invalid payment amount" });
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      // `as any` because stale client may not have receivedAmount / paymentMode on the type
       const invoice: any = await tx.invoice.findUnique({ where: { id } });
 
       if (!invoice)                                   throw new Error("Invoice not found");
@@ -454,10 +445,9 @@ export const recordInvoicePayment = async (req: Request, res: Response) => {
       if (invoice.status === InvoiceStatus.PAID)      throw new Error("Invoice is already fully paid");
 
       const currentOutstanding = Number(invoice.outstandingAmount ?? 0);
-      // Total settlement = cash received + any discount given
-      const totalSettlement = amount + Number(discount ?? 0);
+      const totalSettlement    = amount + Number(discount ?? 0);
       if (totalSettlement > currentOutstanding + 0.01) {
-        throw new Error(`Payment + discount (${totalSettlement}) exceeds outstanding amount (${currentOutstanding})`);
+        throw new Error(`Payment + discount (${totalSettlement}) exceeds outstanding (${currentOutstanding})`);
       }
 
       const newReceived    = Number(invoice.receivedAmount ?? 0) + amount;
@@ -474,9 +464,7 @@ export const recordInvoicePayment = async (req: Request, res: Response) => {
         },
       });
 
-      // Ledger CREDIT
       const newBalance = (await getLastPartyBalanceTx(tx, invoice.partyId)) - amount;
-
       await tx.partyLedger.create({
         data: {
           partyId:   invoice.partyId,
@@ -506,26 +494,19 @@ export const recordInvoicePayment = async (req: Request, res: Response) => {
 ═══════════════════════════════════════════════════════════ */
 export const getInvoiceSummary = async (_req: Request, res: Response) => {
   try {
-    // Use separate aggregate calls to avoid _sum fields that the stale
-    // client doesn't know about yet (receivedAmount / outstandingAmount)
     const [totalAgg, statusCounts] = await Promise.all([
       prisma.invoice.aggregate({
         where: { status: { not: InvoiceStatus.CANCELLED } },
         _sum:  { totalAmount: true },
       }),
-      prisma.invoice.groupBy({
-        by:     ["status"],
-        _count: { id: true },
-      }),
+      prisma.invoice.groupBy({ by: ["status"], _count: { id: true } }),
     ]);
 
-    // receivedAmount / outstandingAmount aggregate via raw-safe approach
     const extraAgg: any = await (prisma.invoice.aggregate as any)({
       where: { status: { not: InvoiceStatus.CANCELLED } },
       _sum:  { receivedAmount: true, outstandingAmount: true },
     });
 
-    // Cancelled invoices total
     const cancelledAgg = await prisma.invoice.aggregate({
       where: { status: InvoiceStatus.CANCELLED },
       _sum:  { totalAmount: true },
@@ -537,14 +518,14 @@ export const getInvoiceSummary = async (_req: Request, res: Response) => {
     return res.json({
       success: true,
       data: {
-        totalInvoiced:    totalAgg._sum?.totalAmount          ?? 0,
-        totalReceived:    extraAgg?._sum?.receivedAmount      ?? 0,
-        totalOutstanding: extraAgg?._sum?.outstandingAmount   ?? 0,
-        totalCancelled:   cancelledAgg._sum?.totalAmount      ?? 0,
-        openCount:        statusMap[InvoiceStatus.OPEN]       ?? 0,
-        partialCount:     statusMap[InvoiceStatus.PARTIAL]    ?? 0,
-        paidCount:        statusMap[InvoiceStatus.PAID]       ?? 0,
-        cancelledCount:   statusMap[InvoiceStatus.CANCELLED]  ?? 0,
+        totalInvoiced:    totalAgg._sum?.totalAmount         ?? 0,
+        totalReceived:    extraAgg?._sum?.receivedAmount     ?? 0,
+        totalOutstanding: extraAgg?._sum?.outstandingAmount  ?? 0,
+        totalCancelled:   cancelledAgg._sum?.totalAmount     ?? 0,
+        openCount:        statusMap[InvoiceStatus.OPEN]      ?? 0,
+        partialCount:     statusMap[InvoiceStatus.PARTIAL]   ?? 0,
+        paidCount:        statusMap[InvoiceStatus.PAID]      ?? 0,
+        cancelledCount:   statusMap[InvoiceStatus.CANCELLED] ?? 0,
       },
     });
   } catch (error) {
@@ -560,14 +541,12 @@ export const getInvoiceSummary = async (_req: Request, res: Response) => {
 export const getPartyItemWiseReport = async (req: Request, res: Response) => {
   const partyId = Number(req.params.id);
   if (isNaN(partyId)) return res.status(400).json({ success: false, message: "Invalid party ID" });
-
   try {
     const invoices = await prisma.invoice.findMany({
       where:   { partyId },
       include: { items: { include: { product: true } } },
       orderBy: { createdAt: "desc" },
     });
-
     const data = invoices.flatMap((invoice) =>
       invoice.items.map((item) => ({
         partyId,
@@ -581,7 +560,6 @@ export const getPartyItemWiseReport = async (req: Request, res: Response) => {
         date:      invoice.createdAt,
       }))
     );
-
     return res.json({ success: true, data });
   } catch (error) {
     console.error("❌ Item-wise Report Error:", error);
@@ -589,31 +567,25 @@ export const getPartyItemWiseReport = async (req: Request, res: Response) => {
   }
 };
 
-/* ══════════════════════════════════════════════════════════════════════════
-   DELETE /api/invoices/:id  — hard delete invoice + its ledger entries
-═══════════════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════
+   DELETE INVOICE
+   DELETE /api/invoices/:id
+═══════════════════════════════════════════════════════════ */
 export const deleteInvoice = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
 
   try {
     await prisma.$transaction(async (tx) => {
-      // 1. Check exists
       const invoice = await tx.invoice.findUnique({ where: { id } });
       if (!invoice) throw new Error("Invoice not found");
 
-      // 2. Remove ledger entries for this invoice
-      await tx.partyLedger.deleteMany({
-        where: { refType: "Invoice", refId: id },
-      });
+      // ✅ Reverse stock movements — items come back IN
+      await reverseStockLedger(tx, StockRefType.SALE, id);
 
-      // 3. Remove payment allocations linked to this invoice
+      await tx.partyLedger.deleteMany({ where: { refType: "Invoice" as any, refId: id } });
       await (tx as any).paymentAllocation?.deleteMany?.({ where: { invoiceId: id } }).catch(() => {});
-
-      // 4. Remove invoice items
       await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
-
-      // 5. Delete invoice
       await tx.invoice.delete({ where: { id } });
     });
 

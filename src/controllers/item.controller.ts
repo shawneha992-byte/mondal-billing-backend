@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, StockRefType } from "@prisma/client";
+import { writeStockLedger } from "../services/stockLedger.service";
 
 const prisma = new PrismaClient();
 
@@ -31,36 +32,55 @@ export const createItem = async (req: Request, res: Response) => {
     const item = await prisma.product.create({
       data: {
         name,
-        itemType: normalizedItemType,
+        itemType:            normalizedItemType,
         category,
-        itemCode: itemCode || null,
-        hsnCode: hsnCode || null,
-        sacCode: sacCode || null,
-        description: description || null,
-        salesPrice: cleanNumber(salesPrice),
-        purchasePrice: cleanNumber(purchasePrice),
-        gstRate: gstRate ? String(gstRate) : null,
+        itemCode:            itemCode            || null,
+        hsnCode:             hsnCode             || null,
+        sacCode:             sacCode             || null,
+        description:         description         || null,
+        salesPrice:          cleanNumber(salesPrice),
+        purchasePrice:       cleanNumber(purchasePrice),
+        gstRate:             gstRate             ? String(gstRate) : null,
         salesDiscountPercent: salesDiscountPercent ? Number(salesDiscountPercent) : null,
         unit,
-        enableSerial: enableSerial ?? false,
-        showOnlineStore: showOnlineStore ?? false,
-        trackBatchExpiry: trackBatchExpiry ?? false,
-        lowStockAlert: lowStockAlert ?? false,
-        lowStockQty: lowStockQty ? Number(lowStockQty) : null,
-        mrp: cleanNumber(mrp),
-        wholesalePrice: cleanNumber(wholesalePrice),
-        serviceCode: normalizedItemType === "Service" ? serviceCode || null : null,
+        enableSerial:        enableSerial        ?? false,
+        showOnlineStore:     showOnlineStore      ?? false,
+        trackBatchExpiry:    trackBatchExpiry     ?? false,
+        lowStockAlert:       lowStockAlert        ?? false,
+        lowStockQty:         lowStockQty          ? Number(lowStockQty) : null,
+        mrp:                 cleanNumber(mrp),
+        wholesalePrice:      cleanNumber(wholesalePrice),
+        serviceCode:         normalizedItemType === "Service" ? serviceCode || null : null,
       },
     });
 
-    if (normalizedItemType === "Product" && godownId && openingStock && Number(openingStock) > 0) {
-      await prisma.productStock.create({
-        data: {
-          productId: item.id,
-          godownId: Number(godownId),
-          openingStock: Number(openingStock),
-          asOfDate: asOfDate ? new Date(asOfDate) : new Date(),
-        },
+    // ✅ FIX: set currentStock = openingStock, and write OPENING StockLedger entry
+    if (normalizedItemType === "Product" && godownId && Number(openingStock) > 0) {
+      const qty = Number(openingStock);
+      await prisma.$transaction(async (tx) => {
+        await tx.productStock.create({
+          data: {
+            productId:    item.id,
+            godownId:     Number(godownId),
+            openingStock: qty,
+            currentStock: qty,                // ← currentStock starts equal to openingStock
+            asOfDate:     asOfDate ? new Date(asOfDate) : new Date(),
+          },
+        });
+        // Write OPENING entry so stock history starts from item creation
+        await tx.stockLedger.create({
+          data: {
+            productId:   item.id,
+            godownId:    Number(godownId),
+            date:        asOfDate ? new Date(asOfDate) : new Date(),
+            refType:     StockRefType.OPENING,
+            refId:       null,
+            quantityIn:  qty,
+            quantityOut: null,
+            balance:     qty,
+            remarks:     "Opening stock",
+          },
+        });
       });
     }
 
@@ -89,8 +109,6 @@ export const getItems = async (req: Request, res: Response) => {
 
 /* ─────────────────────────────────────────────
    GET SINGLE ITEM BY ID
-   Populates all tabs in Inventory.tsx
-   Route: GET /items/:id
 ───────────────────────────────────────────── */
 export const getItemById = async (req: Request, res: Response) => {
   try {
@@ -121,20 +139,20 @@ export const getItemById = async (req: Request, res: Response) => {
     /* ── Stock Details ── */
     const openingEntries = product.ProductStock.map((ps) => ({
       _date: ps.asOfDate,
-      date: formatDMY(ps.asOfDate),
+      date:  formatDMY(ps.asOfDate),
       transactionType: "Opening Stock",
-      quantity: `+${ps.openingStock} ${product.unit ?? "PCS"}`,
-      invoiceNumber: null as string | null,
-      _qty: ps.openingStock,
+      quantity:        `+${ps.openingStock} ${product.unit ?? "PCS"}`,
+      invoiceNumber:   null as string | null,
+      _qty:            ps.openingStock,
     }));
 
     const invoiceEntries = product.invoiceItems.map((ii) => ({
       _date: ii.invoice.createdAt,
-      date: formatDMY(ii.invoice.createdAt),
+      date:  formatDMY(ii.invoice.createdAt),
       transactionType: "Sales Invoice",
-      quantity: `-${ii.quantity} ${product.unit ?? "PCS"}`,
-      invoiceNumber: ii.invoice.invoiceNo,
-      _qty: -ii.quantity,
+      quantity:        `-${ii.quantity} ${product.unit ?? "PCS"}`,
+      invoiceNumber:   ii.invoice.invoiceNo,
+      _qty:            -ii.quantity,
     }));
 
     const allEntries = [...openingEntries, ...invoiceEntries].sort(
@@ -146,11 +164,11 @@ export const getItemById = async (req: Request, res: Response) => {
       .map((entry) => {
         runningStock += entry._qty;
         return {
-          date: entry.date,
+          date:           entry.date,
           transactionType: entry.transactionType,
-          quantity: entry.quantity,
-          invoiceNumber: entry.invoiceNumber,
-          closingStock: `${runningStock} ${product.unit ?? "PCS"}`,
+          quantity:       entry.quantity,
+          invoiceNumber:  entry.invoiceNumber,
+          closingStock:   `${runningStock} ${product.unit ?? "PCS"}`,
         };
       })
       .reverse();
@@ -164,20 +182,21 @@ export const getItemById = async (req: Request, res: Response) => {
       }
       const entry = partyMap.get(partyName)!;
       entry.salesQuantity += ii.quantity;
-    entry.salesAmount += Number(ii.total);
+      entry.salesAmount   += Number(ii.total);
     }
     const partyWiseReport = Array.from(partyMap.values()).map((p) => ({
-      partyName: p.partyName,
-      salesQuantity: p.salesQuantity,
-      salesAmount: p.salesAmount,
+      partyName:        p.partyName,
+      salesQuantity:    p.salesQuantity,
+      salesAmount:      p.salesAmount,
       purchaseQuantity: 0,
-      purchaseAmount: "-",
+      purchaseAmount:   "-",
     }));
 
     /* ── Godown Stock ── */
     const godownStock = product.ProductStock.map((ps) => ({
       godownName: ps.godown.godown_name,
-      stockAvailable: `${ps.openingStock} ${product.unit ?? "PCS"}`,
+      // ✅ FIX: show currentStock (live balance), not openingStock
+      stockAvailable: `${ps.currentStock ?? ps.openingStock} ${product.unit ?? "PCS"}`,
       address: [ps.godown.street_address, ps.godown.city_name, ps.godown.state_name, ps.godown.pincode]
         .filter(Boolean)
         .join(", "),
@@ -185,30 +204,33 @@ export const getItemById = async (req: Request, res: Response) => {
 
     /* ── Party Wise Prices ── */
     const partyWisePrices = product.partyPrices.map((pp) => ({
-      partyName: pp.party.partyName ?? pp.party.name,
+      partyName:  pp.party.partyName ?? pp.party.name,
       salesPrice: Number(pp.price),
     }));
 
     /* ── Total Stock ── */
-    const totalStock = product.ProductStock.reduce((sum, s) => sum + s.openingStock, 0);
+    // ✅ FIX: sum currentStock (live balance), not openingStock
+    const totalStock = product.ProductStock.reduce(
+      (sum, s) => sum + (s.currentStock ?? s.openingStock), 0
+    );
 
     return res.json({
       success: true,
       data: {
-        id: String(product.id),
-        itemName: product.name,
-        itemCode: product.itemCode ?? "",
-        stockQty: `${totalStock} ${product.unit ?? "PCS"}`,
-        stockNumber: totalStock,
-        sellingPrice: product.salesPrice ? Number(product.salesPrice) : null,
-        purchasePrice: product.purchasePrice ? Number(product.purchasePrice) : null,
-        category: product.category ?? "",
-        gstTaxRate: product.gstRate ? `${product.gstRate}%` : "0%",
-        hsnCode: product.hsnCode ?? "",
-        secondaryUnit: product.unit ?? "-",
-        lowStockQty: product.lowStockQty != null ? String(product.lowStockQty) : "-",
+        id:              String(product.id),
+        itemName:        product.name,
+        itemCode:        product.itemCode     ?? "",
+        stockQty:        `${totalStock} ${product.unit ?? "PCS"}`,
+        stockNumber:     totalStock,
+        sellingPrice:    product.salesPrice   ? Number(product.salesPrice)   : null,
+        purchasePrice:   product.purchasePrice ? Number(product.purchasePrice) : null,
+        category:        product.category     ?? "",
+        gstTaxRate:      product.gstRate      ? `${product.gstRate}%` : "0%",
+        hsnCode:         product.hsnCode      ?? "",
+        secondaryUnit:   product.unit         ?? "-",
+        lowStockQty:     product.lowStockQty  != null ? String(product.lowStockQty) : "-",
         lowStockWarning: product.lowStockAlert ? "Enabled" : "Disabled",
-        itemDescription: product.description ?? "",
+        itemDescription: product.description  ?? "",
         stockDetails,
         partyWiseReport,
         godownStock,
@@ -243,47 +265,61 @@ export const adjustStock = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, message: "qty must be a non-negative number" });
     }
 
-    const existing = await prisma.productStock.findUnique({
-      where: { productId_godownId: { productId, godownId: Number(godownId) } },
-    });
+    // ✅ FIX: use currentStock as live balance, update currentStock only, write StockLedger
+    let newStock = 0;
 
-    let newStock: number;
-
-    if (existing) {
-      newStock = type === "add"
-        ? existing.openingStock + adjustQty
-        : existing.openingStock - adjustQty;
-
-      await prisma.productStock.update({
+    await prisma.$transaction(async (tx) => {
+      const existing = await tx.productStock.findUnique({
         where: { productId_godownId: { productId, godownId: Number(godownId) } },
-        data: { openingStock: newStock, asOfDate: new Date() },
       });
-    } else {
-      if (type === "reduce") {
-        return res.status(400).json({
-          success: false,
-          message: "Cannot reduce stock — no stock exists for this godown yet",
+
+      // currentStock is the live balance; openingStock is just the original entry
+      const currentBalance = existing ? (existing.currentStock ?? existing.openingStock) : 0;
+      newStock = type === "add"
+        ? currentBalance + adjustQty
+        : Math.max(0, currentBalance - adjustQty);
+
+      if (existing) {
+        await tx.productStock.update({
+          where: { productId_godownId: { productId, godownId: Number(godownId) } },
+          data:  { currentStock: newStock, asOfDate: new Date() }, // openingStock NOT touched
+        });
+      } else {
+        if (type === "reduce") {
+          throw new Error("Cannot reduce stock — no stock exists for this godown yet");
+        }
+        newStock = adjustQty;
+        await tx.productStock.create({
+          data: {
+            productId,
+            godownId:     Number(godownId),
+            openingStock: newStock,
+            currentStock: newStock,
+            asOfDate:     new Date(),
+          },
         });
       }
-      newStock = adjustQty;
-      await prisma.productStock.create({
+
+      // Write StockLedger ADJUSTMENT entry for full audit trail
+      await tx.stockLedger.create({
         data: {
           productId,
-          godownId: Number(godownId),
-          openingStock: newStock,
-          asOfDate: new Date(),
+          godownId:    Number(godownId),
+          date:        new Date(),
+          refType:     StockRefType.ADJUSTMENT,
+          refId:       null,
+          quantityIn:  type === "add"    ? adjustQty : null,
+          quantityOut: type === "reduce" ? adjustQty : null,
+          balance:     newStock,
+          remarks:     remarks || `Manual ${type === "add" ? "addition" : "reduction"}`,
         },
       });
-    }
-
-    return res.json({
-      success: true,
-      message: "Stock adjusted successfully",
-      data: { newStock },
     });
-  } catch (error) {
+
+    return res.json({ success: true, message: "Stock adjusted successfully", data: { newStock } });
+  } catch (error: any) {
     console.error("adjustStock error:", error);
-    return res.status(500).json({ success: false, message: "Failed to adjust stock" });
+    return res.status(500).json({ success: false, message: error.message || "Failed to adjust stock" });
   }
 };
 
@@ -298,18 +334,19 @@ export const getItemsByGodown = async (req: Request, res: Response) => {
     }
 
     const stocks = await prisma.productStock.findMany({
-      where: { godownId },
+      where:   { godownId },
       include: { product: true },
       orderBy: { createdAt: "desc" },
     });
 
     const items = stocks.map((stock) => ({
-      id: stock.product.id,
-      name: stock.product.name,
-      itemCode: stock.product.itemCode ?? "",
-      salesPrice: stock.product.salesPrice ? Number(stock.product.salesPrice) : null,
+      id:            stock.product.id,
+      name:          stock.product.name,
+      itemCode:      stock.product.itemCode    ?? "",
+      salesPrice:    stock.product.salesPrice  ? Number(stock.product.salesPrice)  : null,
       purchasePrice: stock.product.purchasePrice ? Number(stock.product.purchasePrice) : null,
-      stockQty: stock.openingStock ?? 0,
+      // ✅ FIX: return currentStock so invoice item picker shows real available qty
+      stockQty:      stock.currentStock ?? stock.openingStock ?? 0,
     }));
 
     return res.json({ success: true, data: items });
@@ -325,7 +362,10 @@ export const getItemsByGodown = async (req: Request, res: Response) => {
 export const updateItem = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
-    const { name, itemType, category, salesPrice, purchasePrice, gstRate, unit, description, itemCode, hsnCode, sacCode } = req.body;
+    const {
+      name, itemType, category, salesPrice, purchasePrice,
+      gstRate, unit, description, itemCode, hsnCode, sacCode,
+    } = req.body;
 
     const normalizedItemType = itemType?.toLowerCase() === "product" ? "Product" : "Service";
 
@@ -333,16 +373,16 @@ export const updateItem = async (req: Request, res: Response) => {
       where: { id },
       data: {
         name,
-        itemType: normalizedItemType,
+        itemType:      normalizedItemType,
         category,
-        salesPrice: cleanNumber(salesPrice),
+        salesPrice:    cleanNumber(salesPrice),
         purchasePrice: cleanNumber(purchasePrice),
-        gstRate: gstRate ? String(gstRate) : null,
+        gstRate:       gstRate ? String(gstRate) : null,
         unit,
-        description: description || null,
-        itemCode: itemCode || null,
-        hsnCode: hsnCode || null,
-        sacCode: sacCode || null,
+        description:   description || null,
+        itemCode:      itemCode    || null,
+        hsnCode:       hsnCode     || null,
+        sacCode:       sacCode     || null,
       },
     });
 
