@@ -18,6 +18,7 @@ model Branch {
   purchaseInvoices  PurchaseInvoice[]
   quotations        Quotation[]
   quotationSettings QuotationSettings[]
+  invoiceSettings   InvoiceSettings[]
 }
 
 model User {
@@ -431,6 +432,28 @@ model QuotationSettings {
   branchCode String?
 
   branch Branch? @relation(fields: [branchCode], references: [branch_code])
+}
+
+model InvoiceSettings {
+  id Int @id @default(autoincrement())
+
+  prefix         String?
+  sequenceNumber Int     @default(1)
+
+  enablePrefix Boolean @default(false)
+
+  showPurchasePrice  Boolean @default(false)
+  showItemImage      Boolean @default(false)
+  enablePriceHistory Boolean @default(false)
+
+  invoiceTheme String? @default("Advanced GST")
+
+  branchCode String?
+
+  branch Branch? @relation(fields: [branchCode], references: [branch_code])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model ProformaInvoice {
