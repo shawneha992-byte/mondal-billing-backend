@@ -164,7 +164,7 @@ export const getItemById = async (req: Request, res: Response) => {
       }
       const entry = partyMap.get(partyName)!;
       entry.salesQuantity += ii.quantity;
-      entry.salesAmount   += ii.total;
+    entry.salesAmount += Number(ii.total);
     }
     const partyWiseReport = Array.from(partyMap.values()).map((p) => ({
       partyName: p.partyName,
