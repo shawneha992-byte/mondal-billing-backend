@@ -8,17 +8,19 @@ datasource db {
 }
 
 model Branch {
-  id                Int                 @id @default(autoincrement())
-  branch_name       String
-  branch_code       String              @unique
-  address           String?
-  status            Status              @default(active)
-  users             User[]
-  invoices          Invoice[]
-  purchaseInvoices  PurchaseInvoice[]
-  quotations        Quotation[]
-  quotationSettings QuotationSettings[]
-  invoiceSettings   InvoiceSettings[]
+  id                      Int                       @id @default(autoincrement())
+  branch_name             String
+  branch_code             String                    @unique
+  address                 String?
+  status                  Status                    @default(active)
+  users                   User[]
+  invoices                Invoice[]
+  purchaseInvoices        PurchaseInvoice[]
+  quotations              Quotation[]
+  quotationSettings       QuotationSettings[]
+  invoiceSettings         InvoiceSettings[]
+  purchaseInvoiceSettings PurchaseInvoiceSettings[]
+  paymentOutSettings      PaymentOutSettings[]
 }
 
 model User {
@@ -140,10 +142,10 @@ model ProductStock {
   id           Int      @id @default(autoincrement())
   productId    Int
   godownId     Int
-  openingStock Int
+  openingStock Decimal  @db.Decimal(10, 3)
   asOfDate     DateTime
   createdAt    DateTime @default(now())
-  currentStock Int      @default(0)
+  currentStock Decimal  @default(0) @db.Decimal(10, 3)
   godown       Godown   @relation(fields: [godownId], references: [godown_id], onDelete: Cascade)
   product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
@@ -154,24 +156,24 @@ model StockLedger {
   id Int @id @default(autoincrement())
 
   productId Int
-  godownId  Int?
+  godownId  Int
 
   date DateTime @default(now())
 
   refType StockRefType
   refId   Int?
 
-  quantityIn  Int?
-  quantityOut Int?
+  quantityIn  Decimal @default(0) @db.Decimal(10,3)
+  quantityOut Decimal @default(0) @db.Decimal(10,3)
 
-  balance Int
+  balance Decimal @db.Decimal(10,3)
 
   remarks String?
 
   createdAt DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id])
-  godown  Godown? @relation(fields: [godownId], references: [godown_id])
+  godown  Godown  @relation(fields: [godownId], references: [godown_id])
 
   @@index([productId])
   @@index([date])
@@ -457,6 +459,23 @@ model InvoiceSettings {
   updatedAt DateTime @updatedAt
 }
 
+model PurchaseInvoiceSettings {
+  id Int @id @default(autoincrement())
+
+  prefix             String?
+  sequenceNumber     Int     @default(1)
+  enablePrefix       Boolean @default(false)
+  showItemImage      Boolean @default(false)
+  enablePriceHistory Boolean @default(false)
+
+  branchCode String?
+
+  branch Branch? @relation(fields: [branchCode], references: [branch_code])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model ProformaInvoice {
   id             String                @id @default(uuid())
   proformaNumber String                @unique
@@ -636,6 +655,22 @@ model PaymentOutInvoice {
   discount      Decimal? @db.Decimal(12, 2)
   amountPaid    Decimal  @db.Decimal(12, 2)
   balanceAmount Decimal  @db.Decimal(12, 2)
+}
+
+model PaymentOutSettings {
+  id Int @id @default(autoincrement())
+
+  prefix         String?
+  sequenceNumber Int     @default(1)
+
+  enablePrefix Boolean @default(false)
+
+  branchCode String?
+
+  branch Branch? @relation(fields: [branchCode], references: [branch_code])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 enum PurchaseInvoiceStatus {
