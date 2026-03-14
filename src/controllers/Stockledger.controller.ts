@@ -79,9 +79,12 @@ export const getProductStockLedger = async (req: Request, res: Response) => {
       where:   { productId },
       include: { godown: { select: { godown_name: true } } },
     });
-    const currentStock = stocks.reduce(
-      (s, st) => s + (st.currentStock ?? st.openingStock), 0
-    );
+   const currentStock = stocks.reduce(
+  (s, st) =>
+    s +
+    Number(st.currentStock ?? st.openingStock ?? 0),
+  0
+);
 
     return res.json({ success: true, product, currentStock, data: entries });
   } catch (error) {
@@ -110,20 +113,33 @@ export const createStockAdjustment = async (req: Request, res: Response) => {
         : await tx.productStock.findFirst({ where: { productId: Number(productId) } });
 
       // ✅ FIX: use currentStock as live balance
-      const currentBalance = stock ? (stock.currentStock ?? stock.openingStock) : 0;
+     const currentBalance = stock ? Number(stock.currentStock ?? stock.openingStock ?? 0): 0;
+
       const qIn  = Number(quantityIn  || 0);
       const qOut = Number(quantityOut || 0);
-      const newBalance = Math.max(0, currentBalance + qIn - qOut);
+      if (currentBalance + qIn - qOut < 0) {
+  throw new Error("Stock cannot be negative");
+}
+
+const newBalance = currentBalance + qIn - qOut;
+
+        const finalGodownId =
+          godownId ? Number(godownId) : stock?.godownId;
+
+        if (!finalGodownId) {
+          throw new Error("godownId is required for stock adjustment");
+        }
 
       // Write StockLedger entry
       const entry = await tx.stockLedger.create({
         data: {
           productId:   Number(productId),
-          godownId:    godownId ? Number(godownId) : (stock?.godownId ?? null),
+         godownId: finalGodownId,
           date:        new Date(),
           refType:     StockRefType.ADJUSTMENT,
-          quantityIn:  qIn  > 0 ? qIn  : null,
-          quantityOut: qOut > 0 ? qOut : null,
+         quantityIn:  qIn  > 0 ? qIn  : undefined,
+        quantityOut: qOut > 0 ? qOut : undefined,
+
           balance:     newBalance,
           remarks:     remarks || "Manual Adjustment",
         },
@@ -180,7 +196,8 @@ export const getStockSummary = async (req: Request, res: Response) => {
         lowStockAlert: s.product.lowStockAlert,
         lowStockQty:   s.product.lowStockQty,
         isLowStock:   s.product.lowStockAlert
-          ? liveStock <= (s.product.lowStockQty ?? 0)
+          ? Number(liveStock) <= (s.product.lowStockQty ?? 0)
+
           : false,
       };
     });

@@ -38,7 +38,8 @@ export const createProductStock = async (req: Request, res: Response) => {
             refType:     StockRefType.OPENING,
             refId:       null,
             quantityIn:  qty,
-            quantityOut: null,
+            quantityOut: undefined,
+
             balance:     qty,
             remarks:     "Opening stock",
           },
@@ -98,17 +99,31 @@ export const updateProductStock = async (req: Request, res: Response) => {
     const id = Number(req.params.id);
     const { openingStock, asOfDate } = req.body;
 
-    // ✅ FIX: also update currentStock so the live balance reflects the correction
+    const stock = await prisma.productStock.findUnique({
+      where: { id }
+    });
+
+    if (!stock) {
+      return res.status(404).json({ success: false, message: "Stock not found" });
+    }
+
+    const diff = Number(openingStock) - Number(stock.openingStock ?? 0);
+
     const updatedStock = await prisma.productStock.update({
       where: { id },
       data: {
-        openingStock: openingStock !== undefined ? Number(openingStock) : undefined,
-        currentStock: openingStock !== undefined ? Number(openingStock) : undefined,
-        asOfDate:     asOfDate ? new Date(asOfDate) : undefined,
+        openingStock: Number(openingStock),
+        currentStock: { increment: diff }, // adjusts balance safely
+        asOfDate: asOfDate ? new Date(asOfDate) : undefined,
       },
     });
 
-    return res.json({ success: true, message: "Stock updated successfully", data: updatedStock });
+    return res.json({
+      success: true,
+      message: "Stock updated successfully",
+      data: updatedStock
+    });
+
   } catch (error) {
     console.error(error);
     return res.status(500).json({ success: false, message: "Update failed" });

@@ -115,8 +115,8 @@ export const getPaymentOutById = async (req: Request, res: Response) => {
       notes: payment.notes,
 
       invoices: payment.invoices.map((inv) => ({
-        invoiceNumber: inv.purchaseInvoice.invoiceNumber,
-        date: inv.purchaseInvoice.date,
+          invoiceNumber: inv.purchaseInvoice.purchaseInvNo,
+  date: inv.purchaseInvoice.invoiceDate,
         invoiceAmount: inv.invoiceAmount,
         discount: inv.discount,
         amountPaid: inv.amountPaid,
@@ -138,10 +138,10 @@ export const getPaymentOutById = async (req: Request, res: Response) => {
 export const deletePaymentOut = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
+await prisma.paymentOut.delete({
+  where: { id },
+});
 
-    await prisma.paymentOutInvoice.deleteMany({
-      where: { paymentOutId: id },
-    });
 
     await prisma.paymentOut.delete({
       where: { id },
