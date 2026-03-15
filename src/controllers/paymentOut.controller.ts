@@ -40,9 +40,7 @@ export const createPaymentOut = async (req: Request, res: Response) => {
     const invoices = await prisma.purchaseInvoice.findMany({
       where: {
         partyId,
-        status: {
-          not: "CANCELLED",
-        },
+        status: { not: "CANCELLED" },
       },
       orderBy: {
         invoiceDate: "asc",
@@ -88,35 +86,35 @@ export const createPaymentOut = async (req: Request, res: Response) => {
     }
 
     const payment = await prisma.$transaction(async (tx) => {
+
+      /* ===============================
+         SETTINGS
+      =============================== */
+
       let settings = await tx.paymentOutSettings.findFirst();
 
       if (!settings) {
         settings = await tx.paymentOutSettings.create({
           data: {
-            prefix: "",
-            sequenceNumber: 1,
+            prefix: "PO/",
+            sequenceNumber: 0, // last used sequence
           },
         });
       }
 
       const prefix = settings.prefix || "";
 
-      const lastPayment = await tx.paymentOut.findFirst({
-        orderBy: { id: "desc" },
-      });
+      /* ===============================
+         NEXT SEQUENCE
+      =============================== */
 
-      let sequenceNumber = settings.sequenceNumber;
+      const nextSequence = settings.sequenceNumber + 1;
 
-      if (lastPayment) {
-        const lastNumber = lastPayment.paymentNumber;
-        const lastSeq = parseInt(lastNumber.replace(prefix, ""));
+      const paymentNumber = `${prefix}${nextSequence}`;
 
-        if (!isNaN(lastSeq) && lastSeq >= sequenceNumber) {
-          sequenceNumber = lastSeq + 1;
-        }
-      }
-
-      const paymentNumber = prefix + sequenceNumber;
+      /* ===============================
+         CREATE PAYMENT
+      =============================== */
 
       const payment = await tx.paymentOut.create({
         data: {
@@ -133,12 +131,20 @@ export const createPaymentOut = async (req: Request, res: Response) => {
         },
       });
 
+      /* ===============================
+         UPDATE SETTINGS SEQUENCE
+      =============================== */
+
       await tx.paymentOutSettings.update({
         where: { id: settings.id },
         data: {
-          sequenceNumber: sequenceNumber + 1,
+          sequenceNumber: nextSequence,
         },
       });
+
+      /* ===============================
+         UPDATE INVOICE BALANCES
+      =============================== */
 
       for (const alloc of allocations) {
         const invoice = await tx.purchaseInvoice.findUnique({
@@ -170,6 +176,10 @@ export const createPaymentOut = async (req: Request, res: Response) => {
         });
       }
 
+      /* ===============================
+         PARTY LEDGER ENTRY
+      =============================== */
+
       const lastLedger = await tx.partyLedger.findFirst({
         where: { partyId },
         orderBy: { id: "desc" },
@@ -200,6 +210,7 @@ export const createPaymentOut = async (req: Request, res: Response) => {
       message: "Payment created successfully",
       paymentId: payment.id,
     });
+
   } catch (error) {
     console.error("Create PaymentOut Error:", error);
 
@@ -217,15 +228,9 @@ export const getAllPaymentOut = async (_req: Request, res: Response) => {
   try {
     const payments = await prisma.paymentOut.findMany({
       include: {
-        party: {
-          select: {
-            name: true,
-          },
-        },
+        party: { select: { name: true } },
       },
-      orderBy: {
-        date: "desc",
-      },
+      orderBy: { date: "desc" },
     });
 
     const formatted = payments.map((p) => ({

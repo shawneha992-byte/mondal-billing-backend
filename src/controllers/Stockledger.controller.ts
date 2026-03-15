@@ -115,12 +115,57 @@ export const getProductStockLedger = async (req: Request, res: Response) => {
       0
     );
 
+    /* FORMAT LEDGER FOR UI */
+
+    const formattedEntries = entries.map((e) => {
+
+      let transactionType = e.remarks || "Adjustment";
+
+switch (e.refType) {
+  case StockRefType.OPENING:
+    transactionType = "Opening Stock";
+    break;
+
+  case StockRefType.PURCHASE:
+    transactionType = "Purchase Invoice";
+    break;
+
+  case StockRefType.SALE:
+    transactionType = "Sales Invoice";
+    break;
+
+  case StockRefType.ADJUSTMENT:
+    transactionType = "Stock Adjustment";
+    break;
+
+  case StockRefType.PURCHASE_RETURN:
+    transactionType = "Purchase Return";
+    break;
+}
+      const quantity =
+        e.quantityIn && e.quantityIn > 0
+          ? `+${e.quantityIn}`
+          : `-${e.quantityOut ?? 0}`;
+
+      return {
+        id: e.id,
+        date: e.date,
+        transactionType,
+        quantity,
+        invoiceNumber: e.refId ?? "-",
+        closingStock: e.balance,
+        godown: e.godown?.godown_name ?? null,
+        remarks: e.remarks,
+      };
+    });
+
     res.json({
       success: true,
       product,
       currentStock,
-      data: entries,
+      data: formattedEntries,
     });
+
   } catch (error) {
     console.error("getProductStockLedger:", error);
     res.status(500).json({

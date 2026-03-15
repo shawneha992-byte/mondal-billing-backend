@@ -71,25 +71,30 @@ function deriveStatus(
 /**
  * Resolves the godownId for an item:
  * - Uses item.godownId if provided (normal invoice flow)
- * - Falls back to product.godownId automatically (duplicate / copy flow)
+ * - Falls back to ProductStock godownId (correct schema usage)
  * - Throws a clear error if neither is configured
  */
 async function resolveGodownId(tx: any, item: any): Promise<number> {
-  if (item.godownId) return Number(item.godownId);
+  if (item.godownId) {
+    return Number(item.godownId);
+  }
 
-  const product = await tx.product.findUnique({
-    where: { id: Number(item.productId) },
-    select: { godownId: true },
+  const stock = await tx.productStock.findFirst({
+    where: {
+      productId: Number(item.productId),
+    },
+    select: {
+      godownId: true,
+    },
   });
 
-  if (!product?.godownId) {
+  if (!stock?.godownId) {
     throw new Error(
-      `Godown not configured for productId: ${item.productId}. ` +
-        `Please assign a default godown to this product.`,
+      `No godown assigned for productId: ${item.productId}. Please assign stock to a godown first.`,
     );
   }
 
-  return product.godownId;
+  return stock.godownId;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -193,6 +198,8 @@ export const createPurchaseInvoice = async (req: Request, res: Response) => {
       const paid = Number(amountPaid);
       const balanceAmount = Math.max(0, totalAmount - paid);
 
+      /* ── invoice numbering ── */
+
       let settings = await tx.purchaseInvoiceSettings.findFirst();
 
       if (!settings) {
@@ -205,11 +212,15 @@ export const createPurchaseInvoice = async (req: Request, res: Response) => {
         });
       }
 
-      const seq = req.body.sequenceNumber ?? settings.sequenceNumber;
+      /* fetch sequence only from DB */
+      const seq = settings.sequenceNumber;
 
+      /* generate invoice number */
       const purchaseInvNo = settings.enablePrefix
-        ? `${settings.prefix ?? ""}${seq}`
+        ? `${settings.prefix}${seq}`
         : String(seq);
+
+      
 
       const invoice = await tx.purchaseInvoice.create({
         data: {
@@ -249,48 +260,49 @@ export const createPurchaseInvoice = async (req: Request, res: Response) => {
         data: { sequenceNumber: { increment: 1 } },
       });
 
-      /* ── items + stock ── */
-      for (const item of items) {
-        // IMPROVEMENT 3: reject zero or negative quantities before touching stock
-        if (Number(item.quantity) <= 0) {
-          throw new Error(
-            `Quantity must be greater than zero for productId: ${item.productId}`,
-          );
-        }
+     /* ── items + stock ── */
+for (const item of items) {
 
-        const base = Number(item.price) * Number(item.quantity);
-        const discount = Number(item.discount ?? 0);
-        const taxable = base - discount;
-        const tax = taxable * (Number(item.taxRate ?? 0) / 100);
+  if (Number(item.quantity) <= 0) {
+    throw new Error(
+      `Quantity must be greater than zero for productId: ${item.productId}`,
+    );
+  }
 
-        // Auto-resolve godownId from product if not provided by frontend
-        const godownId = await resolveGodownId(tx, item);
+  const base = Number(item.price) * Number(item.quantity);
+  const discount = Number(item.discount ?? 0);
+  const taxable = base - discount;
+  const tax = taxable * (Number(item.taxRate ?? 0) / 100);
 
-        await tx.purchaseInvoiceItem.create({
-          data: {
-            purchaseInvoiceId: invoice.id,
-            productId: Number(item.productId),
-            godownId,
-            hsnSac: item.hsnSac ?? null,
-            quantity: Number(item.quantity),
-            price: Number(item.price),
-            discount,
-            taxRate: Number(item.taxRate ?? 0),
-            taxAmount: tax,
-            total: taxable,
-          },
-        });
+  // ✅ Properly resolve godown from product stock if frontend did not send it
+  const godownId = await resolveGodownId(tx, item);
 
-        await writeStockLedger({
-          tx,
-          productId: Number(item.productId),
-          godownId,
-          refType: StockRefType.PURCHASE,
-          refId: invoice.id,
-          quantityIn: Number(item.quantity),
-          remarks: "Purchase Invoice",
-        });
-      }
+  await tx.purchaseInvoiceItem.create({
+    data: {
+      purchaseInvoiceId: invoice.id,
+      productId: Number(item.productId),
+      godownId: godownId,
+      hsnSac: item.hsnSac ?? null,
+      quantity: Number(item.quantity),
+      price: Number(item.price),
+      discount: discount,
+      taxRate: Number(item.taxRate ?? 0),
+      taxAmount: tax,
+      total: taxable,
+    },
+  });
+
+  await writeStockLedger({
+  tx,
+  productId: Number(item.productId),
+  godownId,
+  refType: StockRefType.PURCHASE,
+  refId: invoice.id,
+  quantityIn: Number(item.quantity),
+  remarks: `Purchase Invoice ${invoice.purchaseInvNo}`,
+  date: invoice.invoiceDate,
+});
+}
 
       /* ── additional charges ── */
       for (const charge of additionalCharges) {
@@ -352,7 +364,7 @@ export const createPurchaseInvoice = async (req: Request, res: Response) => {
 
 /* ═══════════════════════════════════════════════════════════════
    GET ALL  —  GET /api/purchase-invoices
-═══════════════════════════════════════════════════════════════ */
+═══════════════════════════════════════════════════════ */
 // FIX 2: added missing return res.json(...)
 export const getPurchaseInvoices = async (_req: Request, res: Response) => {
   try {
@@ -374,9 +386,9 @@ export const getPurchaseInvoices = async (_req: Request, res: Response) => {
   }
 };
 
-/* ═══════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════
    GET BY ID  —  GET /api/purchase-invoices/:id
-═══════════════════════════════════════════════════════════════ */
+═══════════════════════════════════════════════════════ */
 export const getPurchaseInvoiceById = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
@@ -397,9 +409,9 @@ export const getPurchaseInvoiceById = async (req: Request, res: Response) => {
   }
 };
 
-/* ═══════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════
    UPDATE  —  PUT /api/purchase-invoices/:id
-═══════════════════════════════════════════════════════════════ */
+═══════════════════════════════════════════════════════ */
 export const updatePurchaseInvoice = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
@@ -503,7 +515,7 @@ export const updatePurchaseInvoice = async (req: Request, res: Response) => {
         const taxable = base - discount;
         const tax = taxable * (Number(item.taxRate ?? 0) / 100);
 
-        // Auto-resolve godownId from product if not provided by frontend
+        // Auto-resolve godownId from product stock if not provided by frontend
         const godownId = await resolveGodownId(tx, item);
 
         await tx.purchaseInvoiceItem.create({
@@ -521,15 +533,16 @@ export const updatePurchaseInvoice = async (req: Request, res: Response) => {
           },
         });
 
-        await writeStockLedger({
-          tx,
-          productId: Number(item.productId),
-          godownId,
-          refType: StockRefType.PURCHASE,
-          refId: id,
-          quantityIn: Number(item.quantity),
-          remarks: "Purchase Invoice Update",
-        });
+       await writeStockLedger({
+  tx,
+  productId: Number(item.productId),
+  godownId,
+  refType: StockRefType.PURCHASE,
+  refId: id,
+  quantityIn: Number(item.quantity),
+  remarks: `Purchase Invoice Update`,
+  date: new Date(),
+});
       }
 
       for (const charge of additionalCharges) {
@@ -590,9 +603,9 @@ export const updatePurchaseInvoice = async (req: Request, res: Response) => {
   }
 };
 
-/* ═══════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════
    DELETE  —  DELETE /api/purchase-invoices/:id
-═══════════════════════════════════════════════════════════════ */
+═══════════════════════════════════════════════════════ */
 export const deletePurchaseInvoice = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
@@ -623,9 +636,9 @@ export const deletePurchaseInvoice = async (req: Request, res: Response) => {
   }
 };
 
-/* ═══════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════
    CANCEL  —  PATCH /api/purchase-invoices/:id/cancel
-═══════════════════════════════════════════════════════════════ */
+═══════════════════════════════════════════════════════ */
 export const cancelPurchaseInvoice = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
@@ -654,9 +667,9 @@ export const cancelPurchaseInvoice = async (req: Request, res: Response) => {
   }
 };
 
-/* ═══════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════
    RECORD PAYMENT  —  PATCH /api/purchase-invoices/:id/payment
-═══════════════════════════════════════════════════════════════ */
+═══════════════════════════════════════════════════════ */
 // FIX 3: rewrote entire broken function — closed transaction, removed
 //        undefined variables (currentBalance, lastBal), removed duplicate
 //        newPaid declaration, fixed tx scope, added missing closing braces.
@@ -722,9 +735,9 @@ export const recordPurchaseInvoicePayment = async (
   }
 };
 
-/* ═══════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════
    SUMMARY  —  GET /api/purchase-invoices/summary
-═══════════════════════════════════════════════════════════════ */
+═══════════════════════════════════════════════════════ */
 export const getPurchaseInvoiceSummary = async (
   _req: Request,
   res: Response,
@@ -759,9 +772,9 @@ export const getPurchaseInvoiceSummary = async (
   }
 };
 
-/* ═══════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════
    PENDING BY PARTY  —  GET /api/purchase-invoices/party/:partyId/pending
-═══════════════════════════════════════════════════════════════ */
+═══════════════════════════════════════════════════════ */
 export const getPendingInvoicesByParty = async (
   req: Request,
   res: Response,

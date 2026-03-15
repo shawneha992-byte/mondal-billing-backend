@@ -12,7 +12,6 @@ export const getPurchaseInvoiceSettings = async (
   try {
     let settings = await prisma.purchaseInvoiceSettings.findFirst();
 
-    /* auto create default settings */
     if (!settings) {
       settings = await prisma.purchaseInvoiceSettings.create({
         data: {
@@ -41,6 +40,7 @@ export const getPurchaseInvoiceSettings = async (
 /* ═══════════════════════════════════════════════
    UPDATE SETTINGS
    PUT /api/purchase-invoices/settings
+   (Sequence NOT editable)
 ═══════════════════════════════════════════════ */
 export const updatePurchaseInvoiceSettings = async (
   req: Request,
@@ -49,7 +49,6 @@ export const updatePurchaseInvoiceSettings = async (
   try {
     const {
       prefix,
-      sequenceNumber,
       enablePrefix,
       showItemImage,
       enablePriceHistory,
@@ -61,7 +60,7 @@ export const updatePurchaseInvoiceSettings = async (
       settings = await prisma.purchaseInvoiceSettings.create({
         data: {
           prefix: prefix ?? "PI",
-          sequenceNumber: Number(sequenceNumber ?? 1),
+          sequenceNumber: 1,
           enablePrefix: enablePrefix ?? true,
           showItemImage: showItemImage ?? false,
           enablePriceHistory: enablePriceHistory ?? false,
@@ -72,7 +71,6 @@ export const updatePurchaseInvoiceSettings = async (
         where: { id: settings.id },
         data: {
           prefix,
-          sequenceNumber: Number(sequenceNumber),
           enablePrefix,
           showItemImage,
           enablePriceHistory,

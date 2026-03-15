@@ -13,12 +13,16 @@ model Branch {
   branch_code       String              @unique
   address           String?
   status            Status              @default(active)
+
   users             User[]
   invoices          Invoice[]
   purchaseInvoices  PurchaseInvoice[]
   quotations        Quotation[]
+
   quotationSettings QuotationSettings[]
   invoiceSettings   InvoiceSettings[]
+  purchaseSettings  PurchaseInvoiceSettings[]
+  paymentOutSettings PaymentOutSettings[]
 }
 
 model User {
@@ -218,7 +222,6 @@ model PartyLedger {
   partyId    Int
   date       DateTime      @default(now())
   createdAt  DateTime      @default(now())
-  created_at DateTime      @default(now())
   refType    LedgerRefType
   refId      Int?
   reference  String?
@@ -625,6 +628,29 @@ model PurchaseInvoiceAdditionalCharge {
   purchaseInvoice   PurchaseInvoice @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
 }
 
+model PurchaseInvoiceSettings {
+  id Int @id @default(autoincrement())
+
+  prefix String?
+  sequenceNumber Int @default(1)
+
+  enablePrefix Boolean @default(false)
+
+  showPurchasePrice  Boolean @default(false)
+  showItemImage      Boolean @default(false)
+  enablePriceHistory Boolean @default(false)
+
+  purchaseTheme String? @default("Advanced GST")
+
+  branchCode String?
+
+  branch Branch? @relation(fields: [branchCode], references: [branch_code])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+
 model PaymentOut {
   id Int @id @default(autoincrement())
 
@@ -658,6 +684,22 @@ model PaymentOutInvoice {
   discount      Decimal? @db.Decimal(12, 2)
   amountPaid    Decimal  @db.Decimal(12, 2)
   balanceAmount Decimal  @db.Decimal(12, 2)
+}
+
+model PaymentOutSettings {
+  id Int @id @default(autoincrement())
+
+  prefix String?
+  sequenceNumber Int @default(1)
+
+  enablePrefix Boolean @default(false)
+
+  branchCode String?
+
+  branch Branch? @relation(fields: [branchCode], references: [branch_code])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 enum PurchaseInvoiceStatus {
