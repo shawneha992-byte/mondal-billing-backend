@@ -38,8 +38,7 @@ export const createProductStock = async (req: Request, res: Response) => {
             refType:     StockRefType.OPENING,
             refId:       null,
             quantityIn:  qty,
-            quantityOut: undefined,
-
+            quantityOut: 0,
             balance:     qty,
             remarks:     "Opening stock",
           },
