@@ -8,19 +8,17 @@ datasource db {
 }
 
 model Branch {
-  id                      Int                       @id @default(autoincrement())
-  branch_name             String
-  branch_code             String                    @unique
-  address                 String?
-  status                  Status                    @default(active)
-  users                   User[]
-  invoices                Invoice[]
-  purchaseInvoices        PurchaseInvoice[]
-  quotations              Quotation[]
-  quotationSettings       QuotationSettings[]
-  invoiceSettings         InvoiceSettings[]
-  purchaseInvoiceSettings PurchaseInvoiceSettings[]
-  paymentOutSettings      PaymentOutSettings[]
+  id                Int                 @id @default(autoincrement())
+  branch_name       String
+  branch_code       String              @unique
+  address           String?
+  status            Status              @default(active)
+  users             User[]
+  invoices          Invoice[]
+  purchaseInvoices  PurchaseInvoice[]
+  quotations        Quotation[]
+  quotationSettings QuotationSettings[]
+  invoiceSettings   InvoiceSettings[]
 }
 
 model User {
@@ -142,41 +140,44 @@ model ProductStock {
   id           Int      @id @default(autoincrement())
   productId    Int
   godownId     Int
-  openingStock Decimal  @db.Decimal(10, 3)
+  openingStock Int
   asOfDate     DateTime
   createdAt    DateTime @default(now())
-  currentStock Decimal  @default(0) @db.Decimal(10, 3)
+  currentStock Int      @default(0)
   godown       Godown   @relation(fields: [godownId], references: [godown_id], onDelete: Cascade)
   product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@unique([productId, godownId])
+  @@index([productId])
+@@index([godownId])
 }
 
 model StockLedger {
   id Int @id @default(autoincrement())
 
   productId Int
-  godownId  Int
+  godownId  Int?
 
   date DateTime @default(now())
 
   refType StockRefType
   refId   Int?
 
-  quantityIn  Decimal @default(0) @db.Decimal(10,3)
-  quantityOut Decimal @default(0) @db.Decimal(10,3)
+  quantityIn  Int @default(0)
+  quantityOut Int @default(0)
 
-  balance Decimal @db.Decimal(10,3)
+  balance Int
 
   remarks String?
 
   createdAt DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id])
-  godown  Godown  @relation(fields: [godownId], references: [godown_id])
+  godown  Godown? @relation(fields: [godownId], references: [godown_id])
 
   @@index([productId])
   @@index([date])
+  @@index([productId, godownId])
 }
 
 model PartyWisePrice {
@@ -256,7 +257,7 @@ model Invoice {
   id        Int    @id @default(autoincrement())
   invoiceNo String @unique
 
-  quotationId Int?
+  quotationId Int? @unique
   quotation   Quotation? @relation(fields: [quotationId], references: [id])
 
   partyId                Int
@@ -293,6 +294,7 @@ model Invoice {
   allocations            PaymentAllocation[]
   salesReturns           SalesReturn[]
 
+@@index([invoiceNo])
   @@index([partyId])
   @@index([invoiceDate])
   @@index([branchCode])
@@ -389,19 +391,18 @@ model Quotation {
   items             QuotationItem[]
   additionalCharges QuotationAdditionalCharge[]
 
-  invoices Invoice[] // ⭐ required relation
+  invoices Invoice?
 
   @@index([partyId])
   @@index([quotationDate])
 }
-
 model QuotationItem {
   id Int @id @default(autoincrement())
 
   quotationId Int
   productId   Int
-
-  quantity Int
+  quantity    Int
+  godownId    Int?
 
   price Decimal @db.Decimal(10, 2)
 
@@ -414,7 +415,12 @@ model QuotationItem {
 
   product   Product   @relation(fields: [productId], references: [id])
   quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+
+  godown Godown? @relation(fields: [godownId], references: [godown_id])
+  @@index([quotationId])
+@@index([productId])
 }
+
 
 model QuotationAdditionalCharge {
   id Int @id @default(autoincrement())
@@ -459,23 +465,6 @@ model InvoiceSettings {
   updatedAt DateTime @updatedAt
 }
 
-model PurchaseInvoiceSettings {
-  id Int @id @default(autoincrement())
-
-  prefix             String?
-  sequenceNumber     Int     @default(1)
-  enablePrefix       Boolean @default(false)
-  showItemImage      Boolean @default(false)
-  enablePriceHistory Boolean @default(false)
-
-  branchCode String?
-
-  branch Branch? @relation(fields: [branchCode], references: [branch_code])
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
 model ProformaInvoice {
   id             String                @id @default(uuid())
   proformaNumber String                @unique
@@ -503,12 +492,15 @@ model ProformaInvoiceItem {
   taxAmount         Float
   total             Float
   proformaInvoice   ProformaInvoice @relation(fields: [proformaInvoiceId], references: [id], onDelete: Cascade)
+
+  godown Godown? @relation(fields: [godownId], references: [godown_id])
 }
 
 model InvoiceItem {
   id        Int      @id @default(autoincrement())
   invoiceId Int
   productId Int
+  godownId  Int?
   quantity  Int
   price     Decimal  @db.Decimal(10, 2)
   total     Decimal  @db.Decimal(10, 2)
@@ -517,6 +509,11 @@ model InvoiceItem {
   taxRate   Float?
   invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   product   Product  @relation(fields: [productId], references: [id])
+  godown    Godown?  @relation(fields: [godownId], references: [godown_id])
+
+  @@index([invoiceId])
+@@index([productId])
+@@index([godownId])
 }
 
 model InvoiceAdditionalCharge {
@@ -655,22 +652,6 @@ model PaymentOutInvoice {
   discount      Decimal? @db.Decimal(12, 2)
   amountPaid    Decimal  @db.Decimal(12, 2)
   balanceAmount Decimal  @db.Decimal(12, 2)
-}
-
-model PaymentOutSettings {
-  id Int @id @default(autoincrement())
-
-  prefix         String?
-  sequenceNumber Int     @default(1)
-
-  enablePrefix Boolean @default(false)
-
-  branchCode String?
-
-  branch Branch? @relation(fields: [branchCode], references: [branch_code])
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
 }
 
 enum PurchaseInvoiceStatus {
