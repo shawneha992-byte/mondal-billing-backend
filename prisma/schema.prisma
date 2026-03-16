@@ -303,6 +303,8 @@ model Invoice {
   items                  InvoiceItem[]
   allocations            PaymentAllocation[]
   salesReturns           SalesReturn[]
+  signatureUrl           String?
+  showEmptySignatureBox  Boolean                   @default(false)
 
   @@index([invoiceNo])
   @@index([partyId])
@@ -401,7 +403,9 @@ model Quotation {
   items             QuotationItem[]
   additionalCharges QuotationAdditionalCharge[]
 
-  invoices Invoice?
+  invoices              Invoice?
+  signatureUrl          String?
+  showEmptySignatureBox Boolean  @default(false)
 
   @@index([partyId])
   @@index([quotationDate])
@@ -707,7 +711,7 @@ model PaymentOutSettings {
 model PurchaseOrder {
   id Int @id @default(autoincrement())
 
-  poNumber   Int 
+  poNumber   Int
   partyId    Int
   branchCode String?
 

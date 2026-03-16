@@ -39,6 +39,8 @@ export const createInvoice = async (req: Request, res: Response) => {
     warrantyPeriod,
     applyTcs           = false,
     autoRoundOff       = false,
+    signatureUrl,
+    showEmptySignatureBox = false,
   } = req.body;
 
   if (!partyId || !items || items.length === 0) {
@@ -156,6 +158,8 @@ if (!stock || availableStock < item.quantity) {
           paymentMode: paymentMode ?? null,
           applyTcs,
           autoRoundOff,
+          signatureUrl:          signatureUrl          ?? null,
+          showEmptySignatureBox: showEmptySignatureBox ?? false,
           status: deriveStatus(receivedAmount, totalAmount),
 
           items: {
@@ -359,6 +363,7 @@ export const updateInvoice = async (req: Request, res: Response) => {
     dueDate, ewayBillNo, challanNo, financedBy,
     salesman, emailId, warrantyPeriod,
     notes, termsConditions,
+    signatureUrl, showEmptySignatureBox,
   } = req.body;
 
   try {
@@ -371,15 +376,17 @@ export const updateInvoice = async (req: Request, res: Response) => {
     const updated = await (prisma.invoice.update as any)({
       where: { id },
       data: {
-        dueDate:         dueDate ? new Date(dueDate) : undefined,
-        ewayBillNo:      ewayBillNo      ?? undefined,
-        challanNo:       challanNo       ?? undefined,
-        financedBy:      financedBy      ?? undefined,
-        salesman:        salesman        ?? undefined,
-        emailId:         emailId         ?? undefined,
-        warrantyPeriod:  warrantyPeriod  ?? undefined,
-        notes:           notes           ?? undefined,
-        termsConditions: termsConditions ?? undefined,
+        dueDate:               dueDate ? new Date(dueDate) : undefined,
+        ewayBillNo:            ewayBillNo            ?? undefined,
+        challanNo:             challanNo             ?? undefined,
+        financedBy:            financedBy            ?? undefined,
+        salesman:              salesman              ?? undefined,
+        emailId:               emailId               ?? undefined,
+        warrantyPeriod:        warrantyPeriod        ?? undefined,
+        notes:                 notes                 ?? undefined,
+        termsConditions:       termsConditions       ?? undefined,
+        signatureUrl:          signatureUrl          !== undefined ? signatureUrl          : undefined,
+        showEmptySignatureBox: showEmptySignatureBox !== undefined ? showEmptySignatureBox : undefined,
       },
     });
 
