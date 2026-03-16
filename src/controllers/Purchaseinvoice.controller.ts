@@ -369,7 +369,7 @@ for (const item of items) {
 export const getPurchaseInvoices = async (_req: Request, res: Response) => {
   try {
     const invoices = await prisma.purchaseInvoice.findMany({
-      include: { party: true, items: true, additionalCharges: true },
+      include: { party: true, items: { include:{product: true}}, additionalCharges: true },
       orderBy: { invoiceDate: "desc" },
     });
 
@@ -394,7 +394,7 @@ export const getPurchaseInvoiceById = async (req: Request, res: Response) => {
     const id = Number(req.params.id);
     const invoice = await prisma.purchaseInvoice.findUnique({
       where: { id },
-      include: { party: true, items: true, additionalCharges: true },
+      include: { party: true, items: {include: { product: true}}, additionalCharges: true },
     });
 
     if (!invoice)
