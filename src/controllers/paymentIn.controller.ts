@@ -1,30 +1,62 @@
-import { LedgerRefType, LedgerType, PaymentMode, InvoiceStatus } from "@prisma/client";
+import { Prisma, PaymentMode, InvoiceStatus } from "@prisma/client";
 import { Request, Response } from "express";
 import { generatePaymentNo } from "../utils/generateNumber";
 import { getLastPartyBalanceTx } from "../services/ledger.service";
 import prisma from "../utils/prisma";
 
+// ─── Allocation shape from req.body ──────────────────────────────────────────
+interface AllocInput { invoiceId: number; amount: number; }
+
+// ─── Transaction client alias ─────────────────────────────────────────────────
+type TX = Prisma.TransactionClient;
+
+// ─── Invoice shape returned by tx.invoice.findMany ───────────────────────────
+type InvoiceRow = {
+  id:                number;
+  totalAmount:       Prisma.Decimal;
+  outstandingAmount: Prisma.Decimal;
+  receivedAmount:    Prisma.Decimal | null;
+};
+
 // ─── Map frontend mode string → Prisma PaymentMode enum ──────────────────────
 function toPaymentMode(mode: string): PaymentMode {
-  const normalized = mode.trim().toLowerCase();
-
   const map: Record<string, PaymentMode> = {
-    cash: PaymentMode.CASH,
-    upi: PaymentMode.UPI,
-    card: PaymentMode.CARD,
-    netbanking: PaymentMode.NETBANKING,
+    cash:            PaymentMode.CASH,
+    upi:             PaymentMode.UPI,
+    card:            PaymentMode.CARD,
+    netbanking:      PaymentMode.NETBANKING,
     "bank transfer": PaymentMode.BANK_TRANSFER,
-    cheque: PaymentMode.CHEQUE,
+    cheque:          PaymentMode.CHEQUE,
   };
-
-  return map[normalized] ?? PaymentMode.CASH;
+  return map[mode.trim().toLowerCase()] ?? PaymentMode.CASH;
 }
 
-// ─── Helper: recalculate invoice status after payment change ─────────────────
+// ─── Recalculate invoice status ───────────────────────────────────────────────
 function calcStatus(outstanding: number, total: number): InvoiceStatus {
   if (outstanding <= 0) return InvoiceStatus.PAID;
   if (outstanding < total) return InvoiceStatus.PARTIAL;
   return InvoiceStatus.OPEN;
+}
+
+// ─── Shared invoice update helper (avoids repetition across 3 operations) ────
+function updateInvoice(
+  tx: TX,
+  inv: InvoiceRow,
+  deltaAmount: number, // positive = receiving payment, negative = reverting
+) {
+  const newOutstanding = Math.max(
+    0,
+    Math.min(Number(inv.totalAmount), Number(inv.outstandingAmount) - deltaAmount)
+  );
+  const newReceived = Math.max(0, Number(inv.receivedAmount ?? 0) + deltaAmount);
+  return tx.invoice.update({
+    where: { id: inv.id },
+    data: {
+      receivedAmount:    newReceived,
+      outstandingAmount: newOutstanding,
+      status:            calcStatus(newOutstanding, Number(inv.totalAmount)),
+    },
+  });
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -40,18 +72,19 @@ export const getPaymentsIn = async (req: Request, res: Response) => {
   const dateTo   = req.query.dateTo    as string | undefined;
   const partyIdQ = req.query.partyId   as string | undefined;
 
-  const where: any = {};
+  const where: Prisma.PaymentInWhereInput = {};
   if (partyIdQ) where.partyId = Number(partyIdQ);
   if (search) {
     where.OR = [
-      { paymentNo:  { contains: search, mode: "insensitive" } },
+      { paymentNo: { contains: search, mode: "insensitive" } },
       { party: { partyName: { contains: search, mode: "insensitive" } } },
     ];
   }
   if (dateFrom || dateTo) {
-    where.date = {};
-    if (dateFrom) where.date.gte = new Date(dateFrom);
-    if (dateTo)   where.date.lte = new Date(`${dateTo}T23:59:59`);
+    const dateFilter: Prisma.DateTimeFilter = {};
+    if (dateFrom) dateFilter.gte = new Date(dateFrom);
+    if (dateTo)   dateFilter.lte = new Date(`${dateTo}T23:59:59`);
+    where.date = dateFilter;
   }
 
   try {
@@ -63,7 +96,8 @@ export const getPaymentsIn = async (req: Request, res: Response) => {
         take: limit,
         orderBy: { date: "desc" },
         include: {
-          party: { select: { id: true, partyName: true } },
+          party:   { select: { id: true, partyName: true } },
+          account: { select: { id: true, accountHolder: true, bankName: true, type: true } },
           allocations: {
             include: {
               invoice: {
@@ -88,7 +122,9 @@ export const getPaymentsIn = async (req: Request, res: Response) => {
         mode:               p.mode,
         amount:             Number(p.amount),
         notes:              p.notes ?? "",
-        totalAmountSettled: p.allocations.reduce((s, a) => s + Number(a.amount), 0),
+        accountId:          p.accountId ?? null,
+        accountName:        p.account?.accountHolder ?? null,
+        totalAmountSettled: p.allocations.reduce((s: number, a) => s + Number(a.amount), 0),
         allocations: p.allocations.map((a) => ({
           invoiceId:      a.invoiceId,
           invoiceNo:      a.invoice.invoiceNo,
@@ -120,7 +156,8 @@ export const getPaymentInById = async (req: Request, res: Response) => {
     const p = await prisma.paymentIn.findUnique({
       where: { id },
       include: {
-        party: { select: { id: true, partyName: true } },
+        party:   { select: { id: true, partyName: true } },
+        account: { select: { id: true, accountHolder: true, bankName: true, type: true } },
         allocations: {
           include: {
             invoice: {
@@ -144,7 +181,9 @@ export const getPaymentInById = async (req: Request, res: Response) => {
       mode:               p.mode,
       amount:             Number(p.amount),
       notes:              p.notes ?? "",
-      totalAmountSettled: p.allocations.reduce((s, a) => s + Number(a.amount), 0),
+      accountId:          p.accountId ?? null,
+      accountName:        p.account?.accountHolder ?? null,
+      totalAmountSettled: p.allocations.reduce((s: number, a) => s + Number(a.amount), 0),
       allocations: p.allocations.map((a) => ({
         invoiceId:      a.invoiceId,
         invoiceNo:      a.invoice.invoiceNo,
@@ -177,11 +216,30 @@ export const getPaymentInSettings = async (_req: Request, res: Response) => {
 };
 
 // ────────────────────────────────────────────────────────────────────────────
+//  GET /api/payments-in/accounts     — list business accounts for dropdown
+// ────────────────────────────────────────────────────────────────────────────
+export const getPaymentInAccounts = async (_req: Request, res: Response) => {
+  try {
+    const accounts = await prisma.$queryRaw<
+      { id: number; accountHolder: string; bankName: string | null; accountNumber: string | null; type: string; balance: number }[]
+    >`
+      SELECT id, "accountHolder", "bankName", "accountNumber", type::text,
+             COALESCE(balance, 0)::float AS balance
+      FROM   "Account"
+      ORDER  BY "accountHolder" ASC
+    `;
+    res.json({ accounts });
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ────────────────────────────────────────────────────────────────────────────
 //  POST /api/payments-in             — create
-//  FIX: timeout: 15000, parallel invoice updates via Promise.all
 // ────────────────────────────────────────────────────────────────────────────
 export const createPaymentIn = async (req: Request, res: Response) => {
-  const { partyId, date, mode, amount, notes, allocations = [] } = req.body;
+  const { partyId, date, mode, amount, notes, accountId } = req.body;
+  const allocations: AllocInput[] = req.body.allocations ?? [];
 
   if (!partyId || !amount || amount <= 0) {
     return res.status(400).json({ message: "partyId and a positive amount are required" });
@@ -189,7 +247,7 @@ export const createPaymentIn = async (req: Request, res: Response) => {
 
   try {
     const result = await prisma.$transaction(
-      async (tx) => {
+      async (tx: TX) => {
         // 1. Generate payment number
         const lastPayment = await tx.paymentIn.findFirst({ orderBy: { id: "desc" } });
         const paymentNo   = generatePaymentNo(lastPayment?.paymentNo);
@@ -199,68 +257,63 @@ export const createPaymentIn = async (req: Request, res: Response) => {
           data: {
             paymentNo,
             partyId,
-            date:  new Date(date),
-            mode:  toPaymentMode(mode),
+            date:      new Date(date),
+            mode:      toPaymentMode(mode),
             amount,
-            notes: notes || null,
+            notes:     notes || null,
+            accountId: accountId ? Number(accountId) : null,
           },
         });
 
-        // 3. Ledger entry
+        // 3. Credit the selected business account balance
+        if (accountId) {
+          await tx.$executeRaw`
+            UPDATE "Account"
+            SET    balance = balance + ${Number(amount)}
+            WHERE  id = ${Number(accountId)}
+          `;
+        }
+
+        // 4. Party ledger entry
         const lastBalance = await getLastPartyBalanceTx(tx, partyId);
         const newBalance  = lastBalance - amount;
         await tx.partyLedger.create({
           data: {
             partyId,
-            refType: LedgerRefType.Payment,
+            refType: "Payment",
             refId:   payment.id,
-            type:    LedgerType.CREDIT,
+            type:    "CREDIT",
             debit:   null,
             credit:  amount,
             balance: newBalance,
           },
         });
 
-        // 4. Validate allocation total
-        const allocatedTotal = allocations.reduce(
-          (s: number, a: any) => s + (a.amount > 0 ? Number(a.amount) : 0),
-          0
-        );
+        // 5. Validate + process allocations
+        const validAllocs = allocations.filter((a) => a.invoiceId && a.amount > 0);
+        const allocatedTotal = validAllocs.reduce((s, a) => s + Number(a.amount), 0);
         if (allocatedTotal > Number(amount) + 0.01) {
           throw new Error("Allocated amount exceeds payment amount");
         }
 
-        // 5. Process allocations — create records first (bulk)
-        const validAllocs = allocations.filter((a: any) => a.invoiceId && a.amount > 0);
         if (validAllocs.length > 0) {
           await tx.paymentAllocation.createMany({
-            data: validAllocs.map((a: any) => ({
+            data: validAllocs.map((a) => ({
               paymentId: payment.id,
               invoiceId: a.invoiceId,
               amount:    a.amount,
             })),
           });
 
-          // Fetch all affected invoices in ONE query
-          const invoiceIds    = validAllocs.map((a: any) => a.invoiceId);
-          const affectedInvs  = await tx.invoice.findMany({ where: { id: { in: invoiceIds } } });
+          const invoiceIds    = validAllocs.map((a) => a.invoiceId);
+          const affectedInvs  = await tx.invoice.findMany({ where: { id: { in: invoiceIds } } }) as InvoiceRow[];
           const invMap        = new Map(affectedInvs.map((inv) => [inv.id, inv]));
 
-          // Update invoices in PARALLEL
           await Promise.all(
-            validAllocs.map((alloc: any) => {
+            validAllocs.map((alloc) => {
               const inv = invMap.get(alloc.invoiceId);
               if (!inv) return Promise.resolve();
-              const newOutstanding = Math.max(0, Number(inv.outstandingAmount) - Number(alloc.amount));
-              const newReceived    = Number(inv.receivedAmount ?? 0) + Number(alloc.amount);
-              return tx.invoice.update({
-                where: { id: alloc.invoiceId },
-                data: {
-                  receivedAmount:    newReceived,
-                  outstandingAmount: newOutstanding,
-                  status:            calcStatus(newOutstanding, Number(inv.totalAmount)),
-                },
-              });
+              return updateInvoice(tx, inv, Number(alloc.amount));
             })
           );
         }
@@ -282,11 +335,11 @@ export const createPaymentIn = async (req: Request, res: Response) => {
 
 // ────────────────────────────────────────────────────────────────────────────
 //  PUT /api/payments-in/:id          — update
-//  FIX: timeout: 15000, parallel invoice revert + update
 // ────────────────────────────────────────────────────────────────────────────
 export const updatePaymentIn = async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
-  const { date, mode, amount, notes, allocations = [] } = req.body;
+  const { date, mode, amount, notes, accountId } = req.body;
+  const allocations: AllocInput[] = req.body.allocations ?? [];
 
   if (!amount || amount <= 0) {
     return res.status(400).json({ message: "A positive amount is required" });
@@ -294,105 +347,103 @@ export const updatePaymentIn = async (req: Request, res: Response) => {
 
   try {
     await prisma.$transaction(
-      async (tx) => {
+      async (tx: TX) => {
         const existing = await tx.paymentIn.findUnique({
           where:   { id },
           include: { allocations: true },
         });
         if (!existing) throw new Error("Payment not found");
 
-        // 1. Fetch all old-allocation invoices in ONE query
-        const oldInvoiceIds   = existing.allocations.map((a) => a.invoiceId);
-        const oldInvoices     = oldInvoiceIds.length > 0
-          ? await tx.invoice.findMany({ where: { id: { in: oldInvoiceIds } } })
-          : [];
+        // 1. Reverse old account balance credit
+        if (existing.accountId) {
+          await tx.$executeRaw`
+            UPDATE "Account"
+            SET    balance = balance - ${Number(existing.amount)}
+            WHERE  id = ${existing.accountId}
+          `;
+        }
+
+        // 2. Fetch old invoice allocations in ONE query
+        const oldInvoiceIds = existing.allocations.map((a) => a.invoiceId);
+        const oldInvoices   = oldInvoiceIds.length > 0
+          ? await tx.invoice.findMany({ where: { id: { in: oldInvoiceIds } } }) as InvoiceRow[]
+          : [] as InvoiceRow[];
         const oldInvMap = new Map(oldInvoices.map((inv) => [inv.id, inv]));
 
-        // 2. Revert old allocations in PARALLEL
+        // 3. Revert old allocations in PARALLEL (negative delta = reverting)
         await Promise.all(
           existing.allocations.map((old) => {
             const inv = oldInvMap.get(old.invoiceId);
             if (!inv) return Promise.resolve();
-            const restoredOutstanding = Math.min(
-              Number(inv.totalAmount),
-              Number(inv.outstandingAmount) + Number(old.amount)
-            );
-            const restoredReceived = Math.max(0, Number(inv.receivedAmount ?? 0) - Number(old.amount));
-            return tx.invoice.update({
-              where: { id: old.invoiceId },
-              data: {
-                receivedAmount:    restoredReceived,
-                outstandingAmount: restoredOutstanding,
-                status:            calcStatus(restoredOutstanding, Number(inv.totalAmount)),
-              },
-            });
+            return updateInvoice(tx, inv, -Number(old.amount));
           })
         );
 
-        // 3. Delete old allocations + old ledger in PARALLEL
+        // 4. Delete old allocations + ledger in PARALLEL
         await Promise.all([
           tx.paymentAllocation.deleteMany({ where: { paymentId: id } }),
-          tx.partyLedger.deleteMany({ where: { refType: LedgerRefType.Payment, refId: id } }),
+          tx.partyLedger.deleteMany({ where: { refType: "Payment", refId: id } }),
         ]);
 
-        // 4. Update payment record
+        // 5. Update payment record
         await tx.paymentIn.update({
           where: { id },
           data: {
-            date:  new Date(date),
-            mode:  toPaymentMode(mode),
+            date:      new Date(date),
+            mode:      toPaymentMode(mode),
             amount,
-            notes: notes || null,
+            notes:     notes || null,
+            accountId: accountId ? Number(accountId) : null,
           },
         });
 
-        // 5. New ledger entry
+        // 6. Credit new account balance
+        if (accountId) {
+          await tx.$executeRaw`
+            UPDATE "Account"
+            SET    balance = balance + ${Number(amount)}
+            WHERE  id = ${Number(accountId)}
+          `;
+        }
+
+        // 7. New ledger entry
         const lastBalance = await getLastPartyBalanceTx(tx, existing.partyId);
         const newBalance  = lastBalance - amount;
         await tx.partyLedger.create({
           data: {
             partyId: existing.partyId,
-            refType: LedgerRefType.Payment,
+            refType: "Payment",
             refId:   id,
-            type:    LedgerType.CREDIT,
+            type:    "CREDIT",
             debit:   null,
             credit:  amount,
             balance: newBalance,
           },
         });
 
-        // 6. New allocations
-        const validAllocs    = allocations.filter((a: any) => a.invoiceId && a.amount > 0);
-        const allocatedTotal = validAllocs.reduce((s: number, a: any) => s + Number(a.amount), 0);
+        // 8. New allocations
+        const validAllocs    = allocations.filter((a) => a.invoiceId && a.amount > 0);
+        const allocatedTotal = validAllocs.reduce((s, a) => s + Number(a.amount), 0);
         if (allocatedTotal > Number(amount) + 0.01) {
           throw new Error("Allocated amount exceeds payment amount");
         }
 
         if (validAllocs.length > 0) {
           await tx.paymentAllocation.createMany({
-            data: validAllocs.map((a: any) => ({
+            data: validAllocs.map((a) => ({
               paymentId: id, invoiceId: a.invoiceId, amount: a.amount,
             })),
           });
 
-          const newInvoiceIds = validAllocs.map((a: any) => a.invoiceId);
-          const newInvoices   = await tx.invoice.findMany({ where: { id: { in: newInvoiceIds } } });
+          const newInvoiceIds = validAllocs.map((a) => a.invoiceId);
+          const newInvoices   = await tx.invoice.findMany({ where: { id: { in: newInvoiceIds } } }) as InvoiceRow[];
           const newInvMap     = new Map(newInvoices.map((inv) => [inv.id, inv]));
 
           await Promise.all(
-            validAllocs.map((alloc: any) => {
+            validAllocs.map((alloc) => {
               const inv = newInvMap.get(alloc.invoiceId);
               if (!inv) return Promise.resolve();
-              const newOutstanding = Math.max(0, Number(inv.outstandingAmount) - Number(alloc.amount));
-              const newReceived    = Number(inv.receivedAmount ?? 0) + Number(alloc.amount);
-              return tx.invoice.update({
-                where: { id: alloc.invoiceId },
-                data: {
-                  receivedAmount:    newReceived,
-                  outstandingAmount: newOutstanding,
-                  status:            calcStatus(newOutstanding, Number(inv.totalAmount)),
-                },
-              });
+              return updateInvoice(tx, inv, Number(alloc.amount));
             })
           );
         }
@@ -409,51 +460,47 @@ export const updatePaymentIn = async (req: Request, res: Response) => {
 
 // ────────────────────────────────────────────────────────────────────────────
 //  DELETE /api/payments-in/:id       — delete
-//  FIX: timeout: 15000, parallel invoice restore
 // ────────────────────────────────────────────────────────────────────────────
 export const deletePaymentIn = async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   try {
     await prisma.$transaction(
-      async (tx) => {
+      async (tx: TX) => {
         const existing = await tx.paymentIn.findUnique({
           where:   { id },
           include: { allocations: true },
         });
         if (!existing) throw new Error("Payment not found");
 
+        // Reverse account balance before deletion
+        if (existing.accountId) {
+          await tx.$executeRaw`
+            UPDATE "Account"
+            SET    balance = balance - ${Number(existing.amount)}
+            WHERE  id = ${existing.accountId}
+          `;
+        }
+
         // Fetch invoices in ONE query
         const invoiceIds = existing.allocations.map((a) => a.invoiceId);
         const invoices   = invoiceIds.length > 0
-          ? await tx.invoice.findMany({ where: { id: { in: invoiceIds } } })
-          : [];
+          ? await tx.invoice.findMany({ where: { id: { in: invoiceIds } } }) as InvoiceRow[]
+          : [] as InvoiceRow[];
         const invMap = new Map(invoices.map((inv) => [inv.id, inv]));
 
-        // Restore invoice outstanding amounts in PARALLEL
+        // Restore invoice outstanding amounts in PARALLEL (negative delta = reverting)
         await Promise.all(
           existing.allocations.map((alloc) => {
             const inv = invMap.get(alloc.invoiceId);
             if (!inv) return Promise.resolve();
-            const restoredOutstanding = Math.min(
-              Number(inv.totalAmount),
-              Number(inv.outstandingAmount) + Number(alloc.amount)
-            );
-            const restoredReceived = Math.max(0, Number(inv.receivedAmount ?? 0) - Number(alloc.amount));
-            return tx.invoice.update({
-              where: { id: alloc.invoiceId },
-              data: {
-                receivedAmount:    restoredReceived,
-                outstandingAmount: restoredOutstanding,
-                status:            calcStatus(restoredOutstanding, Number(inv.totalAmount)),
-              },
-            });
+            return updateInvoice(tx, inv, -Number(alloc.amount));
           })
         );
 
-        // Delete allocations, ledger, payment in PARALLEL where possible
+        // Delete allocations, ledger, payment in PARALLEL
         await Promise.all([
           tx.paymentAllocation.deleteMany({ where: { paymentId: id } }),
-          tx.partyLedger.deleteMany({ where: { refType: LedgerRefType.Payment, refId: id } }),
+          tx.partyLedger.deleteMany({ where: { refType: "Payment", refId: id } }),
         ]);
 
         await tx.paymentIn.delete({ where: { id } });

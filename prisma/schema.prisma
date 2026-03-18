@@ -240,6 +240,8 @@ model PaymentIn {
   notes       String?
   created_at  DateTime            @default(now())
 
+  
+
   allocations PaymentAllocation[]
   party       Party               @relation(fields: [partyId], references: [id])
 }
@@ -253,13 +255,13 @@ model Account {
   branchName    String?
   upiId         String?
 
-  type          AccountType   // CASH / BANK / UPI
+  type          AccountType
+  balance       Decimal  @default(0) @db.Decimal(12,2)  // ✅ ADD THIS
+
   createdAt     DateTime @default(now())
 
   paymentsIn    PaymentIn[]
 }
-
-
 
 model PaymentAllocation {
   id        Int       @id @default(autoincrement())
