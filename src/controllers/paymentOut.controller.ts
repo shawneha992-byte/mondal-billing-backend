@@ -1,6 +1,19 @@
 import { Request, Response } from "express";
-import { LedgerRefType, LedgerType } from "@prisma/client";
+import { LedgerRefType, LedgerType, PaymentMode } from "@prisma/client";
 import prisma from "../utils/prisma";
+
+/* ─── Map frontend string → Prisma PaymentMode enum ─── */
+function toPaymentMode(mode: string): PaymentMode {
+  const map: Record<string, PaymentMode> = {
+    cash:          PaymentMode.CASH,
+    upi:           PaymentMode.UPI,
+    card:          PaymentMode.CARD,
+    netbanking:    PaymentMode.NETBANKING,
+    bank_transfer: PaymentMode.BANK_TRANSFER,
+    cheque:        PaymentMode.CHEQUE,
+  };
+  return map[(mode ?? "cash").trim().toLowerCase()] ?? PaymentMode.CASH;
+}
 
 /* =========================================
    CREATE PAYMENT OUT
@@ -85,6 +98,9 @@ export const createPaymentOut = async (req: Request, res: Response) => {
       remainingAmount -= payAmount;
     }
 
+    // Coerce paymentMode to enum
+    const resolvedPaymentMode = toPaymentMode(paymentMode ?? "cash");
+
     const payment = await prisma.$transaction(async (tx) => {
 
       /* ===============================
@@ -97,7 +113,8 @@ export const createPaymentOut = async (req: Request, res: Response) => {
         settings = await tx.paymentOutSettings.create({
           data: {
             prefix: "PO/",
-            sequenceNumber: 0, // last used sequence
+            sequenceNumber: 1, // schema default is 1
+            enablePrefix: true,
           },
         });
       }
@@ -123,7 +140,7 @@ export const createPaymentOut = async (req: Request, res: Response) => {
           date: new Date(date),
           amountPaid: Number(amountPaid),
           discount: Number(discount),
-          paymentMode,
+          paymentMode: resolvedPaymentMode, // FIX: use enum value
           notes,
           invoices: {
             create: allocations,

@@ -10,10 +10,12 @@ export const getPaymentOutSettings = async (_req: Request, res: Response) => {
     let settings = await prisma.paymentOutSettings.findFirst();
 
     if (!settings) {
+      // FIX: schema default for sequenceNumber is 1 (not 0); add enablePrefix
       settings = await prisma.paymentOutSettings.create({
         data: {
           prefix: "PO/",
-          sequenceNumber: 0, // last used sequence
+          sequenceNumber: 1,
+          enablePrefix: true,
         },
       });
     }
@@ -34,7 +36,7 @@ export const getPaymentOutSettings = async (_req: Request, res: Response) => {
 
 export const updatePaymentOutSettings = async (req: Request, res: Response) => {
   try {
-    const { prefix } = req.body;
+    const { prefix, enablePrefix } = req.body;
 
     const settings = await prisma.paymentOutSettings.findFirst();
 
@@ -47,7 +49,8 @@ export const updatePaymentOutSettings = async (req: Request, res: Response) => {
     const updated = await prisma.paymentOutSettings.update({
       where: { id: settings.id },
       data: {
-        prefix,
+        ...(prefix !== undefined && { prefix }),
+        ...(enablePrefix !== undefined && { enablePrefix }),
       },
     });
 

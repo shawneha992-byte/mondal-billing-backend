@@ -1,15 +1,29 @@
 import { Request, Response } from "express";
 import prisma from "../utils/prisma";
-import { InvoiceStatus, LedgerRefType, LedgerType, StockRefType } from "@prisma/client";
+import { InvoiceStatus, LedgerRefType, LedgerType, PaymentMode, StockRefType } from "@prisma/client";
 import { getLastPartyBalanceTx } from "../services/ledger.service";
 
 /* ═══════════════════════════════════════════════════════════
-   HELPER
+   HELPERS
 ═══════════════════════════════════════════════════════════ */
 const deriveStatus = (received: number, total: number): InvoiceStatus => {
   if (received <= 0)     return InvoiceStatus.OPEN;
   if (received >= total) return InvoiceStatus.PAID;
   return InvoiceStatus.PARTIAL;
+};
+
+/** Coerce any frontend string → Prisma PaymentMode enum (or null if not provided) */
+const toPaymentMode = (mode?: string): PaymentMode | null => {
+  if (!mode) return null;
+  const map: Record<string, PaymentMode> = {
+    cash:          PaymentMode.CASH,
+    upi:           PaymentMode.UPI,
+    card:          PaymentMode.CARD,
+    netbanking:    PaymentMode.NETBANKING,
+    bank_transfer: PaymentMode.BANK_TRANSFER,
+    cheque:        PaymentMode.CHEQUE,
+  };
+  return map[mode.trim().toLowerCase()] ?? PaymentMode.CASH;
 };
 
 /* ═══════════════════════════════════════════════════════════
@@ -188,7 +202,7 @@ export const createInvoice = async (req: Request, res: Response) => {
             totalAmount,
             receivedAmount,
             outstandingAmount,
-            paymentMode: paymentMode ?? null,
+            paymentMode: toPaymentMode(paymentMode),
             applyTcs,
             autoRoundOff,
             signatureUrl:          signatureUrl          ?? null,
@@ -520,7 +534,7 @@ export const recordInvoicePayment = async (req: Request, res: Response) => {
           data: {
             receivedAmount:    newReceived,
             outstandingAmount: newOutstanding,
-            paymentMode:       paymentMode ?? invoice.paymentMode ?? null,
+            paymentMode:       toPaymentMode(paymentMode) ?? toPaymentMode(invoice.paymentMode) ?? null,
             status:            newStatus,
           },
         });

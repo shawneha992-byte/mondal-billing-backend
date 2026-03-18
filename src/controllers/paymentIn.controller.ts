@@ -1,9 +1,8 @@
-import { PrismaClient, LedgerRefType, LedgerType, PaymentMode, InvoiceStatus } from "@prisma/client";
+import { LedgerRefType, LedgerType, PaymentMode, InvoiceStatus } from "@prisma/client";
 import { Request, Response } from "express";
 import { generatePaymentNo } from "../utils/generateNumber";
 import { getLastPartyBalanceTx } from "../services/ledger.service";
-
-const prisma = new PrismaClient();
+import prisma from "../utils/prisma";
 
 // ─── Map frontend mode string → Prisma PaymentMode enum ──────────────────────
 function toPaymentMode(mode: string): PaymentMode {

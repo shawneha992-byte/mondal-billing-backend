@@ -1,8 +1,7 @@
 import { Request, Response } from "express";
-import { PrismaClient, StockRefType } from "@prisma/client";
+import { StockRefType } from "@prisma/client";
 import { writeStockLedger } from "../services/stockLedger.service";
-
-const prisma = new PrismaClient();
+import prisma from "../utils/prisma";
 
 /* helper: strip commas and return numeric string for Decimal fields */
 const cleanNumber = (value: any): string | null => {
