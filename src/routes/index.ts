@@ -17,7 +17,7 @@ import productStockRoutes    from "./productStock.routes";
 import stockLedgerRoutes     from "./StockLedger.routes";
 import invoiceSettingsRoutes from "./invoiceSettings.route";
 import paymentOutRoutes from "./paymentOut.routes";
-
+import purchaseOrderRoutes from "./purchaseOrder.routes"
 const router = Router();
 
 router.use("/auth",              authRoutes);
@@ -37,4 +37,5 @@ router.use("/product-stocks",    productStockRoutes);       // ← ADD: stock op
 router.use("/stock-ledger",      stockLedgerRoutes);        // ← ADD: stock history / audit
 router.use("/invoice-settings",  invoiceSettingsRoutes);    // ← ADD: prefix / sequence settings
 router.use("/payment-out", paymentOutRoutes);
+router.use("/purchase-orders", purchaseOrderRoutes)
 export default router;
