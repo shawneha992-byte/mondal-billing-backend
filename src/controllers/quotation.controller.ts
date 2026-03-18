@@ -2,7 +2,6 @@ import { Request, Response } from "express";
 import prisma from "../utils/prisma";
 import { QuotationStatus, StockRefType } from "@prisma/client";
 
-
 // ============================
 // Create Quotation
 // ============================
@@ -36,76 +35,82 @@ export const createQuotation = async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Party and items are required" });
     }
 
-    const quotation = await prisma.$transaction(async (tx) => {
-      // ── Read (or auto-create) QuotationSettings ────────────────────────
-      let settings = await tx.quotationSettings.findFirst();
-      if (!settings) {
-        settings = await tx.quotationSettings.create({
-          data: { prefix: "", sequenceNumber: 1, branchCode: null },
-        });
-      }
-
-      // ── Build quotation number from prefix + sequence ──────────────────
-      const seq        = settings.sequenceNumber;
-        const rawPrefix = (settings.prefix ?? "QTN").replace(/-+$/, "").trim();
-        const prefix = `${rawPrefix}-`;
-      // Check existing quotations to avoid duplicates (handles gaps/deletions)
-      const generatedQuotationNo =
-          `${prefix}${String(seq).padStart(5, "0")}`;
-          await tx.quotationSettings.update({
-          where: { id: settings.id },
-          data: { sequenceNumber: seq + 1 }
-        });
-
-      const created = await tx.quotation.create({
-        data: {
-          quotationNo:     generatedQuotationNo,            // ← always from settings
-          partyId:         Number(partyId),
-          branchCode:      branchCode || settings.branchCode || null,
-          quotationDate:   quotationDate ? new Date(quotationDate) : new Date(),
-          validTill:       validTill ? new Date(validTill) : null,
-          notes,
-          termsConditions,
-          ewayBillNo:      ewayBillNo     || null,
-          challanNo:       challanNo      || null,
-          financedBy:      financedBy     || null,
-          salesman:        salesman       || null,
-          emailId:         emailId        || null,
-          warrantyPeriod:  warrantyPeriod || null,
-          subTotal,
-          taxableAmount,
-          discountAmount,
-          additionalChargesTotal,
-          taxAmount,
-          roundOff,
-          totalAmount,
-          items: {
-            create: items.map((item: any) => ({
-              productId: Number(item.productId),
-              quantity:  Number(item.quantity),
-              price:     item.price,
-              discount:  item.discount,
-              taxRate:   item.taxRate,
-              taxAmount: item.taxAmount,
-              total:     item.total,
-            })),
-          },
-          additionalCharges: {
-            create: additionalCharges?.map((charge: any) => ({
-              name:   charge.name,
-              amount: charge.amount,
-            })) || [],
-          },
-        },
-        include: {
-          party: true,
-          items: { include: { product: true } },
-          additionalCharges: true,
-        },
+    // ── Read settings OUTSIDE transaction (faster tx) ───────────────────────
+    let settings = await prisma.quotationSettings.findFirst();
+    if (!settings) {
+      settings = await prisma.quotationSettings.create({
+        data: { prefix: "", sequenceNumber: 1, branchCode: null },
       });
+    }
 
-      return created;
-    });
+    // ── FIX: Build quotation number correctly ────────────────────────────────
+    // BUG WAS: if prefix is empty, the code produced "-00001"
+    // FIX: only add "-" separator when prefix is non-empty
+    const seq      = settings.sequenceNumber;
+    const rawPrefix = (settings.prefix ?? "").replace(/-+$/, "").trim();
+    // If no prefix configured, default to "QTN"
+    const effectivePrefix = rawPrefix || "QTN";
+    const quotationNo     = `${effectivePrefix}-${String(seq).padStart(5, "0")}`;
+
+    const quotation = await prisma.$transaction(
+      async (tx) => {
+        // Increment sequence atomically
+        await tx.quotationSettings.update({
+          where: { id: settings!.id },
+          data:  { sequenceNumber: seq + 1 },
+        });
+
+        const created = await tx.quotation.create({
+          data: {
+            quotationNo,
+            partyId:        Number(partyId),
+            branchCode:     branchCode || settings!.branchCode || null,
+            quotationDate:  quotationDate ? new Date(quotationDate) : new Date(),
+            validTill:      validTill ? new Date(validTill) : null,
+            notes,
+            termsConditions,
+            ewayBillNo:     ewayBillNo     || null,
+            challanNo:      challanNo      || null,
+            financedBy:     financedBy     || null,
+            salesman:       salesman       || null,
+            emailId:        emailId        || null,
+            warrantyPeriod: warrantyPeriod || null,
+            subTotal,
+            taxableAmount,
+            discountAmount,
+            additionalChargesTotal,
+            taxAmount,
+            roundOff,
+            totalAmount,
+            items: {
+              create: items.map((item: any) => ({
+                productId: Number(item.productId),
+                quantity:  Number(item.quantity),
+                price:     item.price,
+                discount:  item.discount,
+                taxRate:   item.taxRate,
+                taxAmount: item.taxAmount,
+                total:     item.total,
+              })),
+            },
+            additionalCharges: {
+              create: additionalCharges?.map((charge: any) => ({
+                name:   charge.name,
+                amount: charge.amount,
+              })) || [],
+            },
+          },
+          include: {
+            party:             true,
+            items:             { include: { product: true } },
+            additionalCharges: true,
+          },
+        });
+
+        return created;
+      },
+      { timeout: 15000 }
+    );
 
     res.status(201).json(quotation);
   } catch (error) {
@@ -113,7 +118,6 @@ export const createQuotation = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to create quotation" });
   }
 };
-
 
 
 // ============================
@@ -125,14 +129,11 @@ export const getAllQuotations = async (req: Request, res: Response) => {
 
     const where: any = {};
 
-    // Default to OPEN when no status param is provided.
-    // Frontend sends status=all to see everything, status=CONVERTED to see converted.
     if (!status || status === "") {
       where.status = "OPEN";
     } else if (status !== "all") {
       where.status = String(status).toUpperCase();
     }
-    // if status === "all" → no status filter → return everything
 
     if (startDate || endDate) {
       where.quotationDate = {};
@@ -150,8 +151,8 @@ export const getAllQuotations = async (req: Request, res: Response) => {
     const quotations = await prisma.quotation.findMany({
       where,
       include: {
-        party: true,
-        items: { include: { product: true } },
+        party:             true,
+        items:             { include: { product: true } },
         additionalCharges: true,
       },
       orderBy: { createdAt: "desc" },
@@ -181,63 +182,69 @@ export const duplicateQuotation = async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Quotation not found" });
     }
 
-    // Get next sequence number from settings
+    // ── Read settings OUTSIDE tx ─────────────────────────────────────────────
     const settingsRecord = await prisma.quotationSettings.findFirst();
-    const seqDup    = settingsRecord?.sequenceNumber ?? 1;
-    const rawPfxDup = (settingsRecord?.prefix ?? "").trim();
-const prefixDup = rawPfxDup ? `${rawPfxDup}-` : "QTN-";
-    const newQuotationNo = `${prefixDup}${String(seqDup).padStart(5, "0")}`;
+    const seqDup         = settingsRecord?.sequenceNumber ?? 1;
+    const rawPfxDup      = (settingsRecord?.prefix ?? "").replace(/-+$/, "").trim();
+    // FIX: same fix — default to "QTN" if no prefix
+    const effectivePfxDup = rawPfxDup || "QTN";
+    const newQuotationNo   = `${effectivePfxDup}-${String(seqDup).padStart(5, "0")}`;
 
-    const duplicate = await prisma.$transaction(async (tx) => {
-      const created = await tx.quotation.create({
-        data: {
-          quotationNo: newQuotationNo,
-          partyId: source.partyId,
-          branchCode: source.branchCode,
-          quotationDate: new Date(),
-          validTill: source.validTill,
-          notes: source.notes,
-          termsConditions: source.termsConditions,
-          subTotal: source.subTotal,
-          taxableAmount: source.taxableAmount,
-          discountAmount: source.discountAmount,
-          additionalChargesTotal: source.additionalChargesTotal,
-          taxAmount: source.taxAmount,
-          roundOff: source.roundOff,
-          totalAmount: source.totalAmount,
-          status: "OPEN",
-          items: {
-            create: source.items.map((item) => ({
-                  productId: Number(item.productId),
-                  godownId: Number(item.godownId),
-                  quantity: Number(item.quantity),
-              price: item.price,
-              discount: item.discount,
-              taxRate: item.taxRate,
-              taxAmount: item.taxAmount,
-              total: item.total,
-            })),
+    const duplicate = await prisma.$transaction(
+      async (tx) => {
+        const created = await tx.quotation.create({
+          data: {
+            quotationNo:           newQuotationNo,
+            partyId:               source.partyId,
+            branchCode:            source.branchCode,
+            quotationDate:         new Date(),
+            validTill:             source.validTill,
+            notes:                 source.notes,
+            termsConditions:       source.termsConditions,
+            subTotal:              source.subTotal,
+            taxableAmount:         source.taxableAmount,
+            discountAmount:        source.discountAmount,
+            additionalChargesTotal: source.additionalChargesTotal,
+            taxAmount:             source.taxAmount,
+            roundOff:              source.roundOff,
+            totalAmount:           source.totalAmount,
+            status:                "OPEN",
+            items: {
+              create: source.items.map((item) => ({
+                productId: Number(item.productId),
+                godownId:  item.godownId ? Number(item.godownId) : null,
+                quantity:  Number(item.quantity),
+                price:     item.price,
+                discount:  item.discount,
+                taxRate:   item.taxRate,
+                taxAmount: item.taxAmount,
+                total:     item.total,
+              })),
+            },
+            additionalCharges: {
+              create: source.additionalCharges.map((c) => ({
+                name: c.name, amount: c.amount,
+              })),
+            },
           },
-          additionalCharges: {
-            create: source.additionalCharges.map((c) => ({
-              name: c.name,
-              amount: c.amount,
-            })),
+          include: {
+            party:             true,
+            items:             { include: { product: true } },
+            additionalCharges: true,
           },
-        },
-        include: { party: true, items: { include: { product: true } }, additionalCharges: true },
-      });
-
-      // Bump sequence in settings
-      if (settingsRecord) {
-        await tx.quotationSettings.update({
-          where: { id: settingsRecord.id },
-          data: { sequenceNumber: seqDup + 1 },
         });
-      }
 
-      return created;
-    });
+        if (settingsRecord) {
+          await tx.quotationSettings.update({
+            where: { id: settingsRecord.id },
+            data:  { sequenceNumber: seqDup + 1 },
+          });
+        }
+
+        return created;
+      },
+      { timeout: 15000 }
+    );
 
     res.status(201).json(duplicate);
   } catch (error) {
@@ -255,7 +262,6 @@ export const getQuotationSettings = async (req: Request, res: Response) => {
     let settings = await prisma.quotationSettings.findFirst();
 
     if (!settings) {
-      // Auto-create defaults if none exist
       settings = await prisma.quotationSettings.create({
         data: { prefix: "", sequenceNumber: 1, branchCode: null },
       });
@@ -290,9 +296,9 @@ export const saveQuotationSettings = async (req: Request, res: Response) => {
     } else {
       settings = await prisma.quotationSettings.create({
         data: {
-          prefix: prefix ?? "",
+          prefix:         prefix ?? "",
           sequenceNumber: sequenceNumber ? Number(sequenceNumber) : 1,
-          branchCode: branchCode ?? null,
+          branchCode:     branchCode ?? null,
         },
       });
     }
@@ -305,7 +311,6 @@ export const saveQuotationSettings = async (req: Request, res: Response) => {
 };
 
 
-
 // ============================
 // Get Quotation By ID
 // ============================
@@ -316,14 +321,10 @@ export const getQuotationById = async (req: Request, res: Response) => {
     const quotation = await prisma.quotation.findUnique({
       where: { id },
       include: {
-        party: true,
-        items: {
-          include: {
-            product: true
-          }
-        },
-        additionalCharges: true
-      }
+        party:             true,
+        items:             { include: { product: true } },
+        additionalCharges: true,
+      },
     });
 
     if (!quotation) {
@@ -336,7 +337,6 @@ export const getQuotationById = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Error fetching quotation" });
   }
 };
-
 
 
 // ============================
@@ -356,7 +356,7 @@ export const updateQuotation = async (req: Request, res: Response) => {
     }
 
     const {
-      status,                // ← allow status-only updates (e.g. CONVERTED from invoice flow)
+      status,
       notes,
       termsConditions,
       validTill,
@@ -377,74 +377,72 @@ export const updateQuotation = async (req: Request, res: Response) => {
       totalAmount,
     } = req.body;
 
-    // ── Status-only update (e.g. marking CONVERTED after invoice save) ────
+    // Status-only update
     if (status && !items) {
       const updated = await prisma.quotation.update({
         where: { id },
-        data: { status: status.toUpperCase() as QuotationStatus },
+        data:  { status: status.toUpperCase() as QuotationStatus },
         include: {
-          party: true,
-          items: { include: { product: true } },
+          party:             true,
+          items:             { include: { product: true } },
           additionalCharges: true,
         },
       });
       return res.json(updated);
     }
 
-    const quotation = await prisma.$transaction(async (tx) => {
-   
-      // ── Delete old items & charges ────────────────────────────────────
-      await tx.quotationItem.deleteMany({ where: { quotationId: id } });
-      await tx.quotationAdditionalCharge.deleteMany({ where: { quotationId: id } });
+    const quotation = await prisma.$transaction(
+      async (tx) => {
+        await tx.quotationItem.deleteMany({ where: { quotationId: id } });
+        await tx.quotationAdditionalCharge.deleteMany({ where: { quotationId: id } });
 
-      // ── Update quotation with all fields ──────────────────────────────
-      const updated = await tx.quotation.update({
-        where: { id },
-        data: {
-          notes,
-          termsConditions,
-          validTill:       validTill ? new Date(validTill) : null,
-          ewayBillNo:      ewayBillNo      ?? null,
-          challanNo:       challanNo       ?? null,
-          financedBy:      financedBy      ?? null,
-          salesman:        salesman        ?? null,
-          emailId:         emailId         ?? null,
-          warrantyPeriod:  warrantyPeriod  ?? null,
-          subTotal:        subTotal        ?? existing.subTotal,
-          taxableAmount:   taxableAmount   ?? existing.taxableAmount,
-          discountAmount:  discountAmount  ?? existing.discountAmount,
-          additionalChargesTotal: additionalChargesTotal ?? existing.additionalChargesTotal,
-          taxAmount:       taxAmount       ?? existing.taxAmount,
-          roundOff:        roundOff        ?? existing.roundOff,
-          totalAmount,
-          items: {
-            create: items.map((item: any) => ({
-              productId: Number(item.productId),
-              quantity:  Number(item.quantity),
-              price:     item.price,
-              discount:  item.discount,
-              taxRate:   item.taxRate,
-              taxAmount: item.taxAmount,
-              total:     item.total,
-            })),
+        const updated = await tx.quotation.update({
+          where: { id },
+          data: {
+            notes,
+            termsConditions,
+            validTill:              validTill ? new Date(validTill) : null,
+            ewayBillNo:             ewayBillNo             ?? null,
+            challanNo:              challanNo              ?? null,
+            financedBy:             financedBy             ?? null,
+            salesman:               salesman               ?? null,
+            emailId:                emailId                ?? null,
+            warrantyPeriod:         warrantyPeriod         ?? null,
+            subTotal:               subTotal               ?? existing.subTotal,
+            taxableAmount:          taxableAmount          ?? existing.taxableAmount,
+            discountAmount:         discountAmount         ?? existing.discountAmount,
+            additionalChargesTotal: additionalChargesTotal ?? existing.additionalChargesTotal,
+            taxAmount:              taxAmount              ?? existing.taxAmount,
+            roundOff:               roundOff               ?? existing.roundOff,
+            totalAmount,
+            items: {
+              create: items.map((item: any) => ({
+                productId: Number(item.productId),
+                quantity:  Number(item.quantity),
+                price:     item.price,
+                discount:  item.discount,
+                taxRate:   item.taxRate,
+                taxAmount: item.taxAmount,
+                total:     item.total,
+              })),
+            },
+            additionalCharges: {
+              create: additionalCharges?.map((c: any) => ({
+                name: c.name, amount: c.amount,
+              })) || [],
+            },
           },
-          additionalCharges: {
-            create: additionalCharges?.map((c: any) => ({
-              name:   c.name,
-              amount: c.amount,
-            })) || [],
+          include: {
+            party:             true,
+            items:             { include: { product: true } },
+            additionalCharges: true,
           },
-        },
-        include: {
-          party: true,
-          items: { include: { product: true } },
-          additionalCharges: true,
-        },
-      });
+        });
 
-    
-      return updated;
-    });
+        return updated;
+      },
+      { timeout: 15000 }
+    );
 
     res.json(quotation);
   } catch (error) {
@@ -452,7 +450,6 @@ export const updateQuotation = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to update quotation" });
   }
 };
-
 
 
 // ============================
@@ -472,9 +469,8 @@ export const deleteQuotation = async (req: Request, res: Response) => {
     }
 
     await prisma.$transaction(async (tx) => {
-    
       await tx.quotation.delete({ where: { id } });
-    });
+    }, { timeout: 15000 });
 
     res.json({ message: "Quotation deleted successfully" });
   } catch (error) {
@@ -484,192 +480,185 @@ export const deleteQuotation = async (req: Request, res: Response) => {
 };
 
 
-
 // ============================
 // Convert Quotation → Invoice
 // ============================
-export const convertQuotationToInvoice = async (
-  req: Request,
-  res: Response
-) => {
+export const convertQuotationToInvoice = async (req: Request, res: Response) => {
   try {
     const quotationId = Number(req.params.id);
 
-    // Load quotation with ALL related data needed for the invoice
+    // Load quotation OUTSIDE tx
     const quotation = await prisma.quotation.findUnique({
-      where: { id: quotationId },
-      include: {
-        items: true,
-        additionalCharges: true,
-      },
+      where:   { id: quotationId },
+      include: { items: true, additionalCharges: true },
     });
 
-    if (!quotation) {
+    if (!quotation)
       return res.status(404).json({ message: "Quotation not found" });
-    }
-
-    if (quotation.status === "CONVERTED") {
+    if (quotation.status === "CONVERTED")
       return res.status(400).json({ message: "Quotation already converted to invoice" });
+
+    // ── Pre-fetch stocks OUTSIDE tx (faster tx) ──────────────────────────────
+    const productItems = quotation.items.filter((i) => i.godownId != null);
+    const stockChecks  = await Promise.all(
+      productItems.map((item) =>
+        prisma.productStock.findUnique({
+          where: {
+            productId_godownId: {
+              productId: item.productId,
+              godownId:  item.godownId!,
+            },
+          },
+        })
+      )
+    );
+
+    // Validate stock before entering tx
+    for (let i = 0; i < productItems.length; i++) {
+      const item    = productItems[i];
+      const stock   = stockChecks[i];
+      const available = Number(stock?.currentStock ?? stock?.openingStock ?? 0);
+
+      if (!stock) throw new Error(`Stock record not found for product ${item.productId}`);
+      if (available < item.quantity)
+        throw new Error(`Insufficient stock for product ${item.productId}`);
     }
 
-    const invoice = await prisma.$transaction(async (tx) => {
-      // ── Read (or auto-create) InvoiceSettings for invoice numbering ────
-      let invoiceSettings = await tx.invoiceSettings.findFirst();
-      if (!invoiceSettings) {
-        invoiceSettings = await tx.invoiceSettings.create({
+    // Build stock newBalance map
+    const stockUpdateMap = new Map(
+      productItems.map((item, i) => {
+        const stock      = stockChecks[i]!;
+        const newBalance = Number(stock.currentStock ?? stock.openingStock ?? 0) - item.quantity;
+        return [item.productId, { stockId: stock.id, newBalance, godownId: item.godownId! }];
+      })
+    );
+
+    // ── Read InvoiceSettings OUTSIDE tx ──────────────────────────────────────
+    let invoiceSettings = await prisma.invoiceSettings.findFirst();
+    if (!invoiceSettings) {
+      invoiceSettings = await prisma.invoiceSettings.create({
+        data: { prefix: "", sequenceNumber: 1, enablePrefix: false },
+      });
+    }
+
+    const invPrefix =
+      invoiceSettings.enablePrefix && invoiceSettings.prefix
+        ? invoiceSettings.prefix
+        : "INV-";
+
+    // Find next safe sequence
+    let seq = invoiceSettings.sequenceNumber;
+    let invoiceNo = `${invPrefix}${String(seq).padStart(5, "0")}`;
+    while (await prisma.invoice.findUnique({ where: { invoiceNo } })) {
+      seq++;
+      invoiceNo = `${invPrefix}${String(seq).padStart(5, "0")}`;
+    }
+
+    // ── TRANSACTION — only writes ─────────────────────────────────────────────
+    const invoice = await prisma.$transaction(
+      async (tx) => {
+        // Guard: prevent double conversion
+        const existingInvoice = await tx.invoice.findFirst({ where: { quotationId } });
+        if (existingInvoice) throw new Error("Quotation already converted to invoice");
+
+        const createdInvoice = await tx.invoice.create({
           data: {
-            prefix: "",
-            sequenceNumber: 1,
-            enablePrefix: false,
+            invoiceNo,
+            quotationId:           quotation.id,
+            partyId:               quotation.partyId,
+            branchCode:            quotation.branchCode,
+            invoiceDate:           new Date(),
+            subTotal:              quotation.subTotal,
+            taxableAmount:         quotation.taxableAmount,
+            discountAmount:        quotation.discountAmount,
+            additionalChargesTotal: quotation.additionalChargesTotal,
+            taxAmount:             quotation.taxAmount,
+            roundOff:              quotation.roundOff,
+            totalAmount:           quotation.totalAmount,
+            outstandingAmount:     quotation.totalAmount,
+            notes:                 quotation.notes,
+            termsConditions:       quotation.termsConditions,
+            ewayBillNo:            quotation.ewayBillNo,
+            challanNo:             quotation.challanNo,
+            financedBy:            quotation.financedBy,
+            salesman:              quotation.salesman,
+            emailId:               quotation.emailId,
+            warrantyPeriod:        quotation.warrantyPeriod,
+            items: {
+              create: quotation.items.map((item) => ({
+                productId: Number(item.productId),
+                godownId:  item.godownId ? Number(item.godownId) : null,
+                quantity:  Number(item.quantity),
+                price:     item.price,
+                discount:  item.discount,
+                taxRate:   item.taxRate,
+                taxAmount: item.taxAmount,
+                total:     item.total,
+              })),
+            },
+            additionalCharges: {
+              create: quotation.additionalCharges.map((c) => ({
+                name: c.name, amount: c.amount,
+              })),
+            },
+          },
+          include: {
+            party:             true,
+            items:             { include: { product: true } },
+            additionalCharges: true,
           },
         });
-      }
 
-      // ── Build invoice number from InvoiceSettings prefix + sequence ────
-  const updatedSettings = await tx.invoiceSettings.update({
-  where: { id: invoiceSettings.id },
-  data: {
-    sequenceNumber: { increment: 1 }
-  }
-});
+        // Stock updates — PARALLEL
+        await Promise.all(
+          Array.from(stockUpdateMap.values()).map(({ stockId, newBalance }) =>
+            tx.productStock.update({
+              where: { id: stockId },
+              data:  { currentStock: newBalance },
+            })
+          )
+        );
 
-const seq = updatedSettings.sequenceNumber;
+        // Increment invoice sequence
+        await tx.invoiceSettings.update({
+          where: { id: invoiceSettings!.id },
+          data:  { sequenceNumber: seq + 1 },
+        });
 
-const invPrefix =
-  invoiceSettings.enablePrefix && invoiceSettings.prefix
-    ? invoiceSettings.prefix
-    : "INV-";
+        // Mark quotation as converted
+        await tx.quotation.update({
+          where: { id: quotationId },
+          data:  { status: QuotationStatus.CONVERTED },
+        });
 
-const invoiceNo = `${invPrefix}${String(seq).padStart(5, "0")}`;
+        return createdInvoice;
+      },
+      { timeout: 15000 }
+    );
 
-
-      // ── Create invoice copying ALL fields from the quotation ───────────
- // Check if quotation already converted
-const existingInvoice = await tx.invoice.findFirst({
-  where: { quotationId }
-});
-
-if (existingInvoice) {
-  throw new Error("Quotation already converted to invoice");
-}
-
-// Now create invoice
-const createdInvoice = await tx.invoice.create({
-        data: {
-          invoiceNo,
-          quotationId:           quotation.id,
-          partyId:               quotation.partyId,
-          branchCode:            quotation.branchCode,
-          invoiceDate:           new Date(),
-          // Financial fields
-          subTotal:              quotation.subTotal,
-          taxableAmount:         quotation.taxableAmount,
-          discountAmount:        quotation.discountAmount,
-          additionalChargesTotal: quotation.additionalChargesTotal,
-          taxAmount:             quotation.taxAmount,
-          roundOff:              quotation.roundOff,
-          totalAmount:           quotation.totalAmount,
-          outstandingAmount:     quotation.totalAmount,
-          // Extra detail fields
-          notes:                 quotation.notes,
-          termsConditions:       quotation.termsConditions,
-          ewayBillNo:            quotation.ewayBillNo,
-          challanNo:             quotation.challanNo,
-          financedBy:            quotation.financedBy,
-          salesman:              quotation.salesman,
-          emailId:               quotation.emailId,
-          warrantyPeriod:        quotation.warrantyPeriod,
-          // Line items
-          items: {
-            create: quotation.items.map((item) => ({
-              productId: Number(item.productId),
-              godownId: Number(item.godownId),
-              quantity: Number(item.quantity),
-              price:     item.price,
-              discount:  item.discount,
-              taxRate:   item.taxRate,
-              taxAmount: item.taxAmount,
-              total:     item.total,
-            })),
-          },
-          // Additional charges
-          additionalCharges: {
-            create: quotation.additionalCharges.map((c) => ({
-              name:   c.name,
-              amount: c.amount,
-            })),
-          },
-        },
-        include: {
-          party: true,
-          items: { include: { product: true } },
-          additionalCharges: true,
-        },
+    // ── StockLedger OUTSIDE tx ────────────────────────────────────────────────
+    if (stockUpdateMap.size > 0) {
+      await prisma.stockLedger.createMany({
+        data: Array.from(stockUpdateMap.entries()).map(([productId, { godownId, newBalance }]) => {
+          const item = quotation.items.find((i) => i.productId === productId)!;
+          return {
+            productId,
+            godownId,
+            date:        new Date(),
+            refType:     StockRefType.SALE,
+            refId:       invoice.id,
+            quantityIn:  0,
+            quantityOut: item.quantity,
+            balance:     newBalance,
+            remarks:     `Sales Invoice ${invoiceNo}`,
+          };
+        }),
       });
-      
-// ── Reduce stock for each item (Invoice affects stock) ─────────────
-for (const item of quotation.items) {
-  if (!item.godownId) {
-    throw new Error(`Godown not selected for product ${item.productId}`);
-  }
-
-  const stockRecord = await tx.productStock.findUnique({
-    where: {
-      productId_godownId: {
-        productId: item.productId,
-        godownId: item.godownId
-      }
     }
-  });
-
-  if (!stockRecord) {
-    throw new Error("Stock record not found for this godown");
-  }
-
-const currentBalance = Number(
-  stockRecord.currentStock ?? stockRecord.openingStock ?? 0
-);
-
-
-  if (currentBalance < item.quantity) {
-    throw new Error(`Insufficient stock for product ${item.productId}`);
-  }
-
-  const newBalance = currentBalance - item.quantity;
-
-  await tx.productStock.update({
-    where: { id: stockRecord.id },
-    data: { currentStock: newBalance }
-  });
-
-  await tx.stockLedger.create({
-    data: {
-      productId: item.productId,
-      godownId: item.godownId!,
-       date: new Date(),
-      refType: StockRefType.SALE,
-      refId: createdInvoice.id,
-      quantityIn: 0,
-      quantityOut: item.quantity,
-      balance: newBalance,
-      remarks: `Sales Invoice ${createdInvoice.invoiceNo}`
-    }
-  });
-
-}
-      // ── Mark quotation as CONVERTED ────────────────────────────────────
-      await tx.quotation.update({
-        where: { id: quotationId },
-        data:  { status: QuotationStatus.CONVERTED },
-      });
-
-      return createdInvoice;
-    });
 
     res.json(invoice);
-  } catch (error) {
+  } catch (error: any) {
     console.error(error);
-    res.status(500).json({ error: "Failed to convert quotation" });
+    res.status(500).json({ error: error.message || "Failed to convert quotation" });
   }
-  
 };

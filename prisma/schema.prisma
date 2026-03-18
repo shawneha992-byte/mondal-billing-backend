@@ -233,14 +233,33 @@ model PaymentIn {
   date        DateTime
   mode        PaymentMode
   amount      Decimal             @db.Decimal(12, 2)
+
+  accountId   Int?                // ✅ ADD THIS
+  account     Account?            @relation(fields: [accountId], references: [id])
+
   notes       String?
   created_at  DateTime            @default(now())
+
   allocations PaymentAllocation[]
   party       Party               @relation(fields: [partyId], references: [id])
-
-  @@index([partyId])
-  @@index([date])
 }
+
+model Account {
+  id            Int      @id @default(autoincrement())
+  accountHolder String
+  bankName      String?
+  accountNumber String?
+  ifscCode      String?
+  branchName    String?
+  upiId         String?
+
+  type          AccountType   // CASH / BANK / UPI
+  createdAt     DateTime @default(now())
+
+  paymentsIn    PaymentIn[]
+}
+
+
 
 model PaymentAllocation {
   id        Int       @id @default(autoincrement())
@@ -556,6 +575,9 @@ model PurchaseInvoice {
   status                 PurchaseInvoiceStatus             @default(OPEN)
   createdAt              DateTime                          @default(now())
   updatedAt              DateTime                          @updatedAt
+  showEmptySignatureBox  Boolean                     @default(false)
+  signatureUrl           String?
+
   paymentOutInvoices     PaymentOutInvoice[]
   branch                 Branch?                           @relation(fields: [branchCode], references: [branch_code])
   party                  Party                             @relation(fields: [partyId], references: [id])
@@ -757,11 +779,18 @@ enum LedgerRefType {
 }
 
 enum PaymentMode {
-  Cash
+  CASH
   UPI
-  Card
-  Bank
-  EMI
+  CARD
+  NETBANKING
+  BANK_TRANSFER
+  CHEQUE
+}
+
+enum AccountType {
+  CASH
+  BANK
+  UPI
 }
 
 enum InvoiceStatus {
