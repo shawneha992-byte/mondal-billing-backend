@@ -17,13 +17,15 @@ import productStockRoutes    from "./productStock.routes";
 import stockLedgerRoutes     from "./StockLedger.routes";
 import invoiceSettingsRoutes from "./invoiceSettings.route";
 import paymentOutRoutes from "./paymentOut.routes";
-import purchaseOrderRoutes from "./purchaseOrder.routes"
+import purchaseOrderRoutes from "./purchaseOrder.routes";
+import accountsRoutes from "./accounts.routes"
 const router = Router();
 
 router.use("/auth",              authRoutes);
 router.use("/items",             itemRoutes);
 router.use("/invoices",          invoiceRoutes);
 router.use("/parties",           partyRoutes);
+router.use("/accounts",accountsRoutes);
 router.use("/party-ledger",      partyLedgerRoutes);
 router.use("/payments-in",       paymentInRoutes);
 router.use("/sales-return",      salesReturnRoutes);
