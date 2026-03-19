@@ -60,33 +60,52 @@ export const createPaymentOut = async (req: Request, res: Response) => {
       0
     );
 
-    if (Number(amountPaid) > totalPending) {
+    const totalEffect = Number(amountPaid) + Number(discount || 0);
+
+    if (totalEffect > totalPending) {
       return res.status(400).json({
-        message: "Payment exceeds outstanding balance",
+        message: "Payment + discount exceeds outstanding balance",
       });
     }
 
-    let remainingAmount = Number(amountPaid);
+    /* ===============================
+       DISTRIBUTION LOGIC (FIXED)
+    =============================== */
+
+    let remainingPayment = Number(amountPaid);
+    let remainingDiscount = Number(discount || 0);
+
     const allocations: any[] = [];
 
     for (const inv of pendingInvoices) {
-      if (remainingAmount <= 0) break;
+      if (remainingPayment <= 0 && remainingDiscount <= 0) break;
 
-      const payAmount = Math.min(inv.balance, remainingAmount);
+      // Apply payment FIRST
+      const payAmount = Math.min(inv.balance, remainingPayment);
+      remainingPayment -= payAmount;
+
+      // Apply discount AFTER payment
+      const remainingBalanceAfterPayment = inv.balance - payAmount;
+
+      let appliedDiscount = 0;
+      if (remainingDiscount > 0) {
+        appliedDiscount = Math.min(
+          remainingDiscount,
+          remainingBalanceAfterPayment
+        );
+        remainingDiscount -= appliedDiscount;
+      }
 
       allocations.push({
         purchaseInvoiceId: inv.id,
         invoiceAmount: inv.invoiceAmount,
         amountPaid: payAmount,
-        discount: 0,
-        balanceAmount: inv.balance - payAmount,
+        discount: appliedDiscount,
+        balanceAmount: inv.balance - payAmount - appliedDiscount,
       });
-
-      remainingAmount -= payAmount;
     }
 
     const payment = await prisma.$transaction(async (tx) => {
-
       /* ===============================
          SETTINGS
       =============================== */
@@ -97,7 +116,7 @@ export const createPaymentOut = async (req: Request, res: Response) => {
         settings = await tx.paymentOutSettings.create({
           data: {
             prefix: "PO/",
-            sequenceNumber: 0, // last used sequence
+            sequenceNumber: 0,
           },
         });
       }
@@ -109,7 +128,6 @@ export const createPaymentOut = async (req: Request, res: Response) => {
       =============================== */
 
       const nextSequence = settings.sequenceNumber + 1;
-
       const paymentNumber = `${prefix}${nextSequence}`;
 
       /* ===============================
@@ -154,7 +172,9 @@ export const createPaymentOut = async (req: Request, res: Response) => {
         if (!invoice) continue;
 
         const newPaid =
-          Number(invoice.amountPaid || 0) + Number(alloc.amountPaid);
+          Number(invoice.amountPaid || 0) +
+          Number(alloc.amountPaid) +
+          Number(alloc.discount || 0);
 
         const newBalance = Math.max(
           0,
@@ -187,7 +207,7 @@ export const createPaymentOut = async (req: Request, res: Response) => {
 
       const previousBalance = Number(lastLedger?.balance || 0);
 
-      const newBalance = previousBalance - Number(amountPaid);
+      const newBalance = previousBalance - totalEffect;
 
       await tx.partyLedger.create({
         data: {
@@ -197,7 +217,7 @@ export const createPaymentOut = async (req: Request, res: Response) => {
           refId: payment.id,
           reference: paymentNumber,
           type: LedgerType.DEBIT,
-          debit: Number(amountPaid),
+          debit: Number(amountPaid), // cash only
           credit: 0,
           balance: newBalance,
         },
@@ -310,7 +330,7 @@ export const getPaymentOutById = async (req: Request, res: Response) => {
 };
 
 /* =========================================
-   DELETE PAYMENT OUT
+   DELETE PAYMENT OUT (FIXED)
 ========================================= */
 
 export const deletePaymentOut = async (req: Request, res: Response) => {
@@ -332,8 +352,11 @@ export const deletePaymentOut = async (req: Request, res: Response) => {
 
         if (!invoice) continue;
 
+        const reversedAmount =
+          Number(alloc.amountPaid) + Number(alloc.discount || 0);
+
         const newPaid =
-          Number(invoice.amountPaid || 0) - Number(alloc.amountPaid);
+          Number(invoice.amountPaid || 0) - reversedAmount;
 
         const newBalance =
           Number(invoice.totalAmount) - newPaid;
