@@ -34,6 +34,9 @@ const toPaymentMode = (mode?: string): PaymentMode | null => {
    FIX 3: parallel stock updates via Promise.all inside tx
    FIX 4: StockLedger writes moved OUTSIDE tx (non-critical)
    FIX 5: InvoiceSettings sequence updated via atomic increment
+   FIX 6: discountPct now saved per line item so discount shows on bill
+   FIX 7: line item `total` is now post-discount + tax (not gross)
+   FIX 8: subtotal/taxAmount computed correctly after per-item discount
 ═══════════════════════════════════════════════════════════ */
 export const createInvoice = async (req: Request, res: Response) => {
   const {
@@ -67,7 +70,6 @@ export const createInvoice = async (req: Request, res: Response) => {
 
   try {
     // ── PRE-FETCH: Read all products + stocks + settings BEFORE the transaction ──
-    // This reduces queries inside the tx, cutting its duration significantly.
     const productIds = items.map((i: any) => i.productId);
 
     const [allProducts, invoiceSettings] = await Promise.all([
@@ -116,12 +118,19 @@ export const createInvoice = async (req: Request, res: Response) => {
     }
 
     // ── Compute totals OUTSIDE tx (pure CPU, no DB) ──────────────────────────
+    // FIX: each line's taxable base is AFTER its own discount (pct + flat)
     let subTotal  = 0;
     let taxAmount = 0;
+
     for (const item of items) {
-      const lineTotal = item.price * item.quantity;
-      const lineTax   = (lineTotal * (item.taxRate || 0)) / 100;
-      subTotal  += lineTotal;
+      const lineGross     = Number(item.price) * Number(item.quantity);
+      const discPct       = Number(item.discountPct ?? 0);
+      const discAmt       = Number(item.discount    ?? 0);
+      // pct discount applies to gross; flat discount is additive on top
+      const totalDiscount = Math.round((lineGross * (discPct / 100) + discAmt) * 100) / 100;
+      const taxableBase   = Math.max(0, lineGross - totalDiscount);
+      const lineTax       = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
+      subTotal  += taxableBase;   // subtotal = sum of (post-discount, pre-tax) line bases
       taxAmount += lineTax;
     }
 
@@ -129,11 +138,11 @@ export const createInvoice = async (req: Request, res: Response) => {
       (sum: number, c: { name: string; amount: number }) => sum + (c.amount ?? 0),
       0
     );
-    const taxableAmount     = subTotal - discountAmount;
-    const totalAmount       = taxableAmount + taxAmount + additionalChargesTotal + roundOff;
-    const outstandingAmount = totalAmount - receivedAmount;
+    const taxableAmount     = subTotal - Number(discountAmount);  // invoice-level discount
+    const totalAmount       = taxableAmount + taxAmount + additionalChargesTotal + Number(roundOff);
+    const outstandingAmount = totalAmount - Number(receivedAmount);
 
-    // ── Build invoice number OUTSIDE tx (uses prisma directly, not tx) ───────
+    // ── Build invoice number OUTSIDE tx ──────────────────────────────────────
     const usePrefix  = invoiceSettings?.enablePrefix ?? false;
     const prefix     = usePrefix && invoiceSettings?.prefix?.trim()
                          ? invoiceSettings.prefix.trim()
@@ -150,14 +159,12 @@ export const createInvoice = async (req: Request, res: Response) => {
     }
     let nextSeq = Math.max(seqFromSettings, maxExistingSeq + 1);
     let invoiceNo = `${prefix}${String(nextSeq).padStart(5, "0")}`;
-    // Safety: skip any collisions
     while (await prisma.invoice.findUnique({ where: { invoiceNo } })) {
       nextSeq++;
       invoiceNo = `${prefix}${String(nextSeq).padStart(5, "0")}`;
     }
 
-    // Build stock-update map (productId+godownId → stockId, newBalance)
-    // so the tx only does UPDATE, no SELECTs inside the loop
+    // Build stock-update map
     const stockUpdateMap = new Map<
       number,
       { stockId: number; newBalance: number; productId: number; godownId: number | null }
@@ -174,10 +181,10 @@ export const createInvoice = async (req: Request, res: Response) => {
       });
     }
 
-    // ── TRANSACTION — only critical DB writes, minimal queries ───────────────
+    // ── TRANSACTION — only critical DB writes ─────────────────────────────────
     const created = await prisma.$transaction(
       async (tx) => {
-        // 1. Create invoice + items + additional charges in one nested write
+        // 1. Create invoice + items + additional charges
         const inv = await (tx.invoice.create as any)({
           data: {
             invoiceNo,
@@ -207,18 +214,31 @@ export const createInvoice = async (req: Request, res: Response) => {
             autoRoundOff,
             signatureUrl:          signatureUrl          ?? null,
             showEmptySignatureBox: showEmptySignatureBox ?? false,
-            status: deriveStatus(receivedAmount, totalAmount),
+            status: deriveStatus(Number(receivedAmount), totalAmount),
             items: {
-              create: items.map((item: any) => ({
-                productId: item.productId,
-                godownId:  item.godownId ?? null,
-                quantity:  item.quantity,
-                price:     item.price,
-                discount:  item.discount  ?? 0,
-                taxRate:   item.taxRate   ?? 0,
-                taxAmount: (item.price * item.quantity * (item.taxRate || 0)) / 100,
-                total:     item.price * item.quantity,
-              })),
+              // FIX: store discountPct, correct flat discount ₹, and correct post-discount total
+              create: items.map((item: any) => {
+                const lineGross     = Number(item.price) * Number(item.quantity);
+                const discPct       = Number(item.discountPct ?? 0);
+                const discAmt       = Number(item.discount    ?? 0);
+                const pctDiscount   = Math.round(lineGross * (discPct / 100) * 100) / 100;
+                const totalDiscount = Math.round((pctDiscount + discAmt) * 100) / 100;
+                const taxableBase   = Math.max(0, lineGross - totalDiscount);
+                const taxAmt        = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
+                const lineTotal     = Math.round((taxableBase + taxAmt) * 100) / 100;
+
+                return {
+                  productId:   item.productId,
+                  godownId:    item.godownId ?? null,
+                  quantity:    item.quantity,
+                  price:       item.price,
+                  discountPct: discPct,          // ← percentage saved for display on bill
+                  discount:    totalDiscount,    // ← total flat ₹ discount (pct-derived + fixed)
+                  taxRate:     item.taxRate   ?? 0,
+                  taxAmount:   taxAmt,
+                  total:       lineTotal,        // ← post-discount + tax (correct net amount)
+                };
+              }),
             },
             ...(additionalCharges.length > 0 && {
               additionalCharges: {
@@ -230,7 +250,7 @@ export const createInvoice = async (req: Request, res: Response) => {
           },
         });
 
-        // 2. Stock updates — all in PARALLEL (Promise.all — no sequential loop)
+        // 2. Stock updates — all in PARALLEL
         if (stockUpdateMap.size > 0) {
           await Promise.all(
             Array.from(stockUpdateMap.values()).map(({ stockId, newBalance }) =>
@@ -258,7 +278,7 @@ export const createInvoice = async (req: Request, res: Response) => {
         });
 
         // 4. If upfront payment — CREDIT immediately
-        if (receivedAmount > 0) {
+        if (Number(receivedAmount) > 0) {
           await tx.partyLedger.create({
             data: {
               partyId,
@@ -268,12 +288,12 @@ export const createInvoice = async (req: Request, res: Response) => {
               type:      LedgerType.CREDIT,
               debit:     null,
               credit:    receivedAmount,
-              balance:   balanceAfterDebit - receivedAmount,
+              balance:   balanceAfterDebit - Number(receivedAmount),
             },
           });
         }
 
-        // 5. Increment sequence atomically (no race condition)
+        // 5. Increment sequence atomically
         if (invoiceSettings?.id) {
           await tx.invoiceSettings.update({
             where: { id: invoiceSettings.id },
@@ -283,10 +303,10 @@ export const createInvoice = async (req: Request, res: Response) => {
 
         return inv;
       },
-      { timeout: 15000 } // ← FIX: 15 s timeout for cloud DB latency
+      { timeout: 15000 }
     );
 
-    // ── OUTSIDE TRANSACTION — StockLedger (non-critical, never blocks payment) ──
+    // ── OUTSIDE TRANSACTION — StockLedger (non-critical) ─────────────────────
     if (stockUpdateMap.size > 0) {
       await prisma.stockLedger.createMany({
         data: Array.from(stockUpdateMap.values()).map(({ productId, godownId, newBalance }) => {
@@ -339,6 +359,7 @@ export const getInvoices = async (req: Request, res: Response) => {
       where,
       include: {
         party:             true,
+        // FIX: include discountPct in items so the bill can display it
         items:             { include: { product: true } },
         additionalCharges: true,
         allocations:       true,
@@ -369,6 +390,7 @@ export const getInvoiceById = async (req: Request, res: Response) => {
       where: { id },
       include: {
         party:             true,
+        // FIX: discountPct is now part of InvoiceItem — returned automatically
         items:             { include: { product: true } },
         additionalCharges: true,
         allocations:       true,

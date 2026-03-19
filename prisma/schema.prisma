@@ -497,6 +497,7 @@ model InvoiceItem {
   price     Decimal  @db.Decimal(10, 2)
   total     Decimal  @db.Decimal(10, 2)
   discount  Decimal? @db.Decimal(10, 2)
+  discountPct Float?    
   taxAmount Decimal? @db.Decimal(10, 2)
   taxRate   Float?
   godownId  Int?
