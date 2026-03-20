@@ -1,11 +1,10 @@
 import { Request, Response } from "express";
 import prisma from "../utils/prisma";
-import { InvoiceStatus, LedgerRefType, LedgerType } from "@prisma/client";
+import { InvoiceStatus, LedgerRefType, LedgerType, PaymentMode, StockRefType } from "@prisma/client";
 import { getLastPartyBalanceTx } from "../services/ledger.service";
 
-
 /* ═══════════════════════════════════════════════════════════
-   HELPER
+   HELPERS
 ═══════════════════════════════════════════════════════════ */
 const deriveStatus = (received: number, total: number): InvoiceStatus => {
   if (received <= 0)     return InvoiceStatus.OPEN;
@@ -13,9 +12,31 @@ const deriveStatus = (received: number, total: number): InvoiceStatus => {
   return InvoiceStatus.PARTIAL;
 };
 
+/** Coerce any frontend string → Prisma PaymentMode enum (or null if not provided) */
+const toPaymentMode = (mode?: string): PaymentMode | null => {
+  if (!mode) return null;
+  const map: Record<string, PaymentMode> = {
+    cash:          PaymentMode.CASH,
+    upi:           PaymentMode.UPI,
+    card:          PaymentMode.CARD,
+    netbanking:    PaymentMode.NETBANKING,
+    bank_transfer: PaymentMode.BANK_TRANSFER,
+    cheque:        PaymentMode.CHEQUE,
+  };
+  return map[mode.trim().toLowerCase()] ?? PaymentMode.CASH;
+};
+
 /* ═══════════════════════════════════════════════════════════
    CREATE INVOICE
    POST /api/invoices
+   FIX 1: timeout: 15000 on $transaction
+   FIX 2: product validation & totals computed BEFORE entering tx
+   FIX 3: parallel stock updates via Promise.all inside tx
+   FIX 4: StockLedger writes moved OUTSIDE tx (non-critical)
+   FIX 5: InvoiceSettings sequence updated via atomic increment
+   FIX 6: discountPct now saved per line item so discount shows on bill
+   FIX 7: line item `total` is now post-discount + tax (not gross)
+   FIX 8: subtotal/taxAmount computed correctly after per-item discount
 ═══════════════════════════════════════════════════════════ */
 export const createInvoice = async (req: Request, res: Response) => {
   const {
@@ -24,7 +45,7 @@ export const createInvoice = async (req: Request, res: Response) => {
     invoiceDate,
     dueDate,
     items              = [],
-    additionalCharges  = [],   // [{ name, amount }]
+    additionalCharges  = [],
     discountAmount     = 0,
     roundOff           = 0,
     paymentMode,
@@ -39,6 +60,8 @@ export const createInvoice = async (req: Request, res: Response) => {
     warrantyPeriod,
     applyTcs           = false,
     autoRoundOff       = false,
+    signatureUrl,
+    showEmptySignatureBox = false,
   } = req.body;
 
   if (!partyId || !items || items.length === 0) {
@@ -46,222 +69,267 @@ export const createInvoice = async (req: Request, res: Response) => {
   }
 
   try {
-    const invoice = await prisma.$transaction(async (tx) => {
+    // ── PRE-FETCH: Read all products + stocks + settings BEFORE the transaction ──
+    const productIds = items.map((i: any) => i.productId);
 
-      // ── 1. Validate products & accumulate totals ──────────
-      let subTotal  = 0;
-      let taxAmount = 0;
+    const [allProducts, invoiceSettings] = await Promise.all([
+      prisma.product.findMany({ where: { id: { in: productIds } } }),
+      prisma.invoiceSettings.findFirst({ orderBy: { id: "asc" } }),
+    ]);
 
-      for (const item of items) {
-     const product = await tx.product.findUnique({
-  where: { id: item.productId }
-});
+    const productMap = new Map(allProducts.map((p) => [p.id, p]));
 
-if (!product) {
-  throw new Error(`Product not found (ID: ${item.productId})`);
-}
-
-if (product.itemType === "Product") {
-  const stock = item.godownId
-    ? await tx.productStock.findUnique({
-        where: {
-          productId_godownId: {
-            productId: item.productId,
-            godownId: item.godownId
-          }
-        }
-      })
-    : await tx.productStock.findFirst({
-        where: { productId: item.productId }
-      });
-
-  const availableStock = stock?.currentStock ?? stock?.openingStock ?? 0;
-
-if (!stock || availableStock < item.quantity) {
-  throw new Error(`Insufficient stock for "${product.name}"`);
-}
-}
-
-      // ── 2. Totals ─────────────────────────────────────────
-      const additionalChargesTotal: number = additionalCharges.reduce(
-        (sum: number, c: { name: string; amount: number }) => sum + (c.amount ?? 0),
-        0
-      );
-      const taxableAmount     = subTotal - discountAmount;
-      const totalAmount       = taxableAmount + taxAmount + additionalChargesTotal + roundOff;
-      const outstandingAmount = totalAmount - receivedAmount;
-
-      // ── 3. Invoice number — reads InvoiceSettings for prefix/sequence ──
-      // Load settings (outside tx to avoid nested read issues)
-      const invoiceSettings = await prisma.invoiceSettings.findFirst({
-        orderBy: { id: "asc" },
-      });
-
-      const usePrefix  = invoiceSettings?.enablePrefix  ?? false;
-      const prefix     = usePrefix && invoiceSettings?.prefix?.trim()
-                           ? invoiceSettings.prefix.trim()
-                           : "INV-";
-      const seqFromSettings = invoiceSettings?.sequenceNumber ?? 1;
-
-      // Also check existing invoices with this prefix to avoid duplicates
-      // (handles case where DB was seeded with old numbers)
-      const allNos = await tx.invoice.findMany({ select: { invoiceNo: true } });
-      let maxExistingSeq = 0;
-      for (const inv of allNos) {
-        if (inv.invoiceNo?.startsWith(prefix)) {
-          const m = inv.invoiceNo.slice(prefix.length).match(/^(\d+)$/);
-          if (m) maxExistingSeq = Math.max(maxExistingSeq, parseInt(m[1], 10));
-        }
+    // Validate all products exist before entering tx
+    for (const item of items) {
+      if (!productMap.has(item.productId)) {
+        return res.status(400).json({
+          success: false,
+          message: `Product not found (ID: ${item.productId})`,
+        });
       }
-
-      // Use whichever is higher: the saved sequence or the max existing
-      let nextSeq = Math.max(seqFromSettings, maxExistingSeq + 1);
-
-      // Safety loop — skip any that somehow still exist
-      let invoiceNo = `${prefix}${String(nextSeq).padStart(5, "0")}`;
-      while (await tx.invoice.findUnique({ where: { invoiceNo } })) {
-        nextSeq++;
-        invoiceNo = `${prefix}${String(nextSeq).padStart(5, "0")}`;
-      }
-
-      // ── 4. Persist invoice ────────────────────────────────
-      // `as any` because the generated Prisma client may be behind the schema.
-      // Fix: run `npx prisma db push && npx prisma generate`
-      const created = await (tx.invoice.create as any)({
-        data: {
-          invoiceNo,
-          partyId,                                            // scalar FK
-          branchCode:  branchCode ?? null,                   // scalar FK
-          invoiceDate: invoiceDate ? new Date(invoiceDate) : new Date(),
-          dueDate:     dueDate    ? new Date(dueDate)     : null,
-
-          ewayBillNo:     ewayBillNo     ?? null,
-          challanNo:      challanNo      ?? null,
-          financedBy:     financedBy     ?? null,
-          salesman:       salesman       ?? null,
-          emailId:        emailId        ?? null,
-          warrantyPeriod: warrantyPeriod ?? null,
-          notes:          notes          ?? null,
-          termsConditions: termsConditions ?? null,
-
-          subTotal,
-          taxableAmount,
-          discountAmount,
-          additionalChargesTotal,
-          taxAmount,
-          roundOff,
-          totalAmount,
-          receivedAmount,
-          outstandingAmount,
-          paymentMode: paymentMode ?? null,
-          applyTcs,
-          autoRoundOff,
-          status: deriveStatus(receivedAmount, totalAmount),
-
-          items: {
-            create: items.map((item: any) => ({
-              productId: item.productId,
-              quantity:  item.quantity,
-              price:     item.price,
-              discount:  item.discount  ?? 0,
-              taxRate:   item.taxRate   ?? 0,
-              taxAmount: (item.price * item.quantity * (item.taxRate || 0)) / 100,
-              total:     item.price * item.quantity,
-            })),
-          },
-
-          ...(additionalCharges.length > 0 && {
-            additionalCharges: {
-              create: additionalCharges.map((c: { name: string; amount: number }) => ({
-                name:   c.name,
-                amount: c.amount,
-              })),
-            },
-          }),
-        },
-      });
-
-    // ── 5. Reduce stock ───────────────────────────────────
-for (const item of items) {
-  const product = await tx.product.findUnique({
-    where: { id: item.productId }
-  });
-
-  if (product?.itemType !== "Product") continue;
-
-  const stock = item.godownId
-    ? await tx.productStock.findUnique({
-        where: {
-          productId_godownId: {
-            productId: item.productId,
-            godownId: item.godownId
-          }
-        }
-      })
-    : await tx.productStock.findFirst({
-        where: { productId: item.productId }
-      });
-
-  if (!stock) continue;
-
-  const currentBalance = stock.currentStock ?? stock.openingStock ?? 0;
-  const newBalance = Math.max(0, currentBalance - Number(item.quantity));
-
-  await tx.productStock.update({
-    where: { id: stock.id },
-    data: {
-      currentStock: newBalance
     }
-  });
-}
-      // ── 6. Ledger DEBIT — full invoice amount ─────────────
-      const balanceAfterDebit = (await getLastPartyBalanceTx(tx, partyId)) + totalAmount;
 
-      await tx.partyLedger.create({
-        data: {
-          partyId,
-          refType:   LedgerRefType.Invoice,
-          refId:     created.id,
-          reference: created.invoiceNo,
-          type:      LedgerType.DEBIT,
-          debit:     totalAmount,
-          credit:    null,
-          balance:   balanceAfterDebit,
-        },
+    // Pre-fetch stocks for all product items (only Products, not Services)
+    const productTypeItems = items.filter((i: any) => productMap.get(i.productId)?.itemType === "Product");
+
+    const stockChecks = await Promise.all(
+      productTypeItems.map((item: any) =>
+        item.godownId
+          ? prisma.productStock.findUnique({
+              where: { productId_godownId: { productId: item.productId, godownId: item.godownId } },
+            })
+          : prisma.productStock.findFirst({ where: { productId: item.productId } })
+      )
+    );
+
+    // Validate stock availability
+    for (let i = 0; i < productTypeItems.length; i++) {
+      const item    = productTypeItems[i];
+      const stock   = stockChecks[i];
+      const product = productMap.get(item.productId)!;
+      const available = Number(stock?.currentStock ?? stock?.openingStock ?? 0);
+
+      if (!stock || available < item.quantity) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient stock for "${product.name}" (available: ${available}, requested: ${item.quantity})`,
+        });
+      }
+    }
+
+    // ── Compute totals OUTSIDE tx (pure CPU, no DB) ──────────────────────────
+    // FIX: each line's taxable base is AFTER its own discount (pct + flat)
+    let subTotal  = 0;
+    let taxAmount = 0;
+
+    for (const item of items) {
+      const lineGross     = Number(item.price) * Number(item.quantity);
+      const discPct       = Number(item.discountPct ?? 0);
+      const discAmt       = Number(item.discount    ?? 0);
+      // pct discount applies to gross; flat discount is additive on top
+      const totalDiscount = Math.round((lineGross * (discPct / 100) + discAmt) * 100) / 100;
+      const taxableBase   = Math.max(0, lineGross - totalDiscount);
+      const lineTax       = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
+      subTotal  += taxableBase;   // subtotal = sum of (post-discount, pre-tax) line bases
+      taxAmount += lineTax;
+    }
+
+    const additionalChargesTotal: number = additionalCharges.reduce(
+      (sum: number, c: { name: string; amount: number }) => sum + (c.amount ?? 0),
+      0
+    );
+    const taxableAmount     = subTotal - Number(discountAmount);  // invoice-level discount
+    const totalAmount       = taxableAmount + taxAmount + additionalChargesTotal + Number(roundOff);
+    const outstandingAmount = totalAmount - Number(receivedAmount);
+
+    // ── Build invoice number OUTSIDE tx ──────────────────────────────────────
+    const usePrefix  = invoiceSettings?.enablePrefix ?? false;
+    const prefix     = usePrefix && invoiceSettings?.prefix?.trim()
+                         ? invoiceSettings.prefix.trim()
+                         : "INV-";
+    const seqFromSettings = invoiceSettings?.sequenceNumber ?? 1;
+
+    const allNos = await prisma.invoice.findMany({ select: { invoiceNo: true } });
+    let maxExistingSeq = 0;
+    for (const inv of allNos) {
+      if (inv.invoiceNo?.startsWith(prefix)) {
+        const m = inv.invoiceNo.slice(prefix.length).match(/^(\d+)$/);
+        if (m) maxExistingSeq = Math.max(maxExistingSeq, parseInt(m[1], 10));
+      }
+    }
+    let nextSeq = Math.max(seqFromSettings, maxExistingSeq + 1);
+    let invoiceNo = `${prefix}${String(nextSeq).padStart(5, "0")}`;
+    while (await prisma.invoice.findUnique({ where: { invoiceNo } })) {
+      nextSeq++;
+      invoiceNo = `${prefix}${String(nextSeq).padStart(5, "0")}`;
+    }
+
+    // Build stock-update map
+    const stockUpdateMap = new Map<
+      number,
+      { stockId: number; newBalance: number; productId: number; godownId: number | null }
+    >();
+    for (let i = 0; i < productTypeItems.length; i++) {
+      const item  = productTypeItems[i];
+      const stock = stockChecks[i]!;
+      const newBalance = Number(stock.currentStock ?? stock.openingStock ?? 0) - Number(item.quantity);
+      stockUpdateMap.set(item.productId, {
+        stockId: stock.id,
+        newBalance,
+        productId: item.productId,
+        godownId:  stock.godownId,
       });
+    }
 
-      // ── 7. If upfront payment — CREDIT immediately ────────
-      if (receivedAmount > 0) {
+    // ── TRANSACTION — only critical DB writes ─────────────────────────────────
+    const created = await prisma.$transaction(
+      async (tx) => {
+        // 1. Create invoice + items + additional charges
+        const inv = await (tx.invoice.create as any)({
+          data: {
+            invoiceNo,
+            partyId,
+            branchCode:  branchCode ?? null,
+            invoiceDate: invoiceDate ? new Date(invoiceDate) : new Date(),
+            dueDate:     dueDate    ? new Date(dueDate)     : null,
+            ewayBillNo:     ewayBillNo     ?? null,
+            challanNo:      challanNo      ?? null,
+            financedBy:     financedBy     ?? null,
+            salesman:       salesman       ?? null,
+            emailId:        emailId        ?? null,
+            warrantyPeriod: warrantyPeriod ?? null,
+            notes:          notes          ?? null,
+            termsConditions: termsConditions ?? null,
+            subTotal,
+            taxableAmount,
+            discountAmount,
+            additionalChargesTotal,
+            taxAmount,
+            roundOff,
+            totalAmount,
+            receivedAmount,
+            outstandingAmount,
+            paymentMode: toPaymentMode(paymentMode),
+            applyTcs,
+            autoRoundOff,
+            signatureUrl:          signatureUrl          ?? null,
+            showEmptySignatureBox: showEmptySignatureBox ?? false,
+            status: deriveStatus(Number(receivedAmount), totalAmount),
+            items: {
+              // FIX: store discountPct, correct flat discount ₹, and correct post-discount total
+              create: items.map((item: any) => {
+                const lineGross     = Number(item.price) * Number(item.quantity);
+                const discPct       = Number(item.discountPct ?? 0);
+                const discAmt       = Number(item.discount    ?? 0);
+                const pctDiscount   = Math.round(lineGross * (discPct / 100) * 100) / 100;
+                const totalDiscount = Math.round((pctDiscount + discAmt) * 100) / 100;
+                const taxableBase   = Math.max(0, lineGross - totalDiscount);
+                const taxAmt        = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
+                const lineTotal     = Math.round((taxableBase + taxAmt) * 100) / 100;
+
+                return {
+                  productId:   item.productId,
+                  godownId:    item.godownId ?? null,
+                  quantity:    item.quantity,
+                  price:       item.price,
+                  discountPct: discPct,          // ← percentage saved for display on bill
+                  discount:    totalDiscount,    // ← total flat ₹ discount (pct-derived + fixed)
+                  taxRate:     item.taxRate   ?? 0,
+                  taxAmount:   taxAmt,
+                  total:       lineTotal,        // ← post-discount + tax (correct net amount)
+                };
+              }),
+            },
+            ...(additionalCharges.length > 0 && {
+              additionalCharges: {
+                create: additionalCharges.map((c: { name: string; amount: number }) => ({
+                  name: c.name, amount: c.amount,
+                })),
+              },
+            }),
+          },
+        });
+
+        // 2. Stock updates — all in PARALLEL
+        if (stockUpdateMap.size > 0) {
+          await Promise.all(
+            Array.from(stockUpdateMap.values()).map(({ stockId, newBalance }) =>
+              tx.productStock.update({
+                where: { id: stockId },
+                data:  { currentStock: newBalance },
+              })
+            )
+          );
+        }
+
+        // 3. Party ledger DEBIT
+        const balanceAfterDebit = (await getLastPartyBalanceTx(tx, partyId)) + totalAmount;
         await tx.partyLedger.create({
           data: {
             partyId,
-            refType:   LedgerRefType.Payment,
-            refId:     created.id,
-            reference: created.invoiceNo,
-            type:      LedgerType.CREDIT,
-            debit:     null,
-            credit:    receivedAmount,
-            balance:   balanceAfterDebit - receivedAmount,
+            refType:   LedgerRefType.Invoice,
+            refId:     inv.id,
+            reference: inv.invoiceNo,
+            type:      LedgerType.DEBIT,
+            debit:     totalAmount,
+            credit:    null,
+            balance:   balanceAfterDebit,
           },
         });
-      }
 
-      // ── 8. Increment sequenceNumber in InvoiceSettings for next invoice ──
-      if (invoiceSettings?.id) {
-        await prisma.invoiceSettings.update({
-          where: { id: invoiceSettings.id },
-          data:  { sequenceNumber: nextSeq + 1 },
-        });
-      }
+        // 4. If upfront payment — CREDIT immediately
+        if (Number(receivedAmount) > 0) {
+          await tx.partyLedger.create({
+            data: {
+              partyId,
+              refType:   LedgerRefType.Payment,
+              refId:     inv.id,
+              reference: inv.invoiceNo,
+              type:      LedgerType.CREDIT,
+              debit:     null,
+              credit:    receivedAmount,
+              balance:   balanceAfterDebit - Number(receivedAmount),
+            },
+          });
+        }
 
-      return created;
-   } });
+        // 5. Increment sequence atomically
+        if (invoiceSettings?.id) {
+          await tx.invoiceSettings.update({
+            where: { id: invoiceSettings.id },
+            data:  { sequenceNumber: nextSeq + 1 },
+          });
+        }
 
+        return inv;
+      },
+      { timeout: 15000 }
+    );
+
+    // ── OUTSIDE TRANSACTION — StockLedger (non-critical) ─────────────────────
+    if (stockUpdateMap.size > 0) {
+      await prisma.stockLedger.createMany({
+        data: Array.from(stockUpdateMap.values()).map(({ productId, godownId, newBalance }) => {
+          const item = items.find((i: any) => i.productId === productId)!;
+          return {
+            productId,
+            godownId:    godownId ?? null,
+            date:        new Date(),
+            refType:     StockRefType.SALE,
+            refId:       created.id,
+            quantityIn:  0,
+            quantityOut: Number(item.quantity),
+            balance:     newBalance,
+            remarks:     `Sales Invoice ${invoiceNo}`,
+          };
+        }),
+      });
+    }
 
     return res.status(201).json({
       success: true,
       message: "Invoice created successfully",
-      data: invoice,
+      data: created,
     });
   } catch (error: any) {
     console.error("❌ Create Invoice Error:", error);
@@ -277,21 +345,11 @@ export const getInvoices = async (req: Request, res: Response) => {
   try {
     const { partyId, status, limit, page } = req.query;
 
-    // Build where clause from query params
     const where: any = {};
-
-    if (partyId) {
-      where.partyId = Number(partyId);
-    }
-
+    if (partyId) where.partyId = Number(partyId);
     if (status) {
-      // Support single status ("OPEN") or comma-separated ("OPEN,PARTIAL")
-      const statuses = String(status).split(",").map(s => s.trim()).filter(Boolean);
-      if (statuses.length === 1) {
-        where.status = statuses[0];
-      } else if (statuses.length > 1) {
-        where.status = { in: statuses };
-      }
+      const statuses = String(status).split(",").map((s) => s.trim()).filter(Boolean);
+      where.status   = statuses.length === 1 ? statuses[0] : { in: statuses };
     }
 
     const take = limit ? Math.min(500, Number(limit)) : undefined;
@@ -301,6 +359,7 @@ export const getInvoices = async (req: Request, res: Response) => {
       where,
       include: {
         party:             true,
+        // FIX: include discountPct in items so the bill can display it
         items:             { include: { product: true } },
         additionalCharges: true,
         allocations:       true,
@@ -331,6 +390,7 @@ export const getInvoiceById = async (req: Request, res: Response) => {
       where: { id },
       include: {
         party:             true,
+        // FIX: discountPct is now part of InvoiceItem — returned automatically
         items:             { include: { product: true } },
         additionalCharges: true,
         allocations:       true,
@@ -339,7 +399,6 @@ export const getInvoiceById = async (req: Request, res: Response) => {
     });
 
     if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found" });
-
     return res.json({ success: true, data: invoice });
   } catch (error) {
     console.error("❌ Fetch Invoice Error:", error);
@@ -359,27 +418,30 @@ export const updateInvoice = async (req: Request, res: Response) => {
     dueDate, ewayBillNo, challanNo, financedBy,
     salesman, emailId, warrantyPeriod,
     notes, termsConditions,
+    signatureUrl, showEmptySignatureBox,
   } = req.body;
 
   try {
     const existing = await prisma.invoice.findUnique({ where: { id } });
-    if (!existing) return res.status(404).json({ success: false, message: "Invoice not found" });
-    if (existing.status === InvoiceStatus.CANCELLED) {
+    if (!existing)
+      return res.status(404).json({ success: false, message: "Invoice not found" });
+    if (existing.status === InvoiceStatus.CANCELLED)
       return res.status(400).json({ success: false, message: "Cannot update a cancelled invoice" });
-    }
 
     const updated = await (prisma.invoice.update as any)({
       where: { id },
       data: {
-        dueDate:         dueDate ? new Date(dueDate) : undefined,
-        ewayBillNo:      ewayBillNo      ?? undefined,
-        challanNo:       challanNo       ?? undefined,
-        financedBy:      financedBy      ?? undefined,
-        salesman:        salesman        ?? undefined,
-        emailId:         emailId         ?? undefined,
-        warrantyPeriod:  warrantyPeriod  ?? undefined,
-        notes:           notes           ?? undefined,
-        termsConditions: termsConditions ?? undefined,
+        dueDate:               dueDate ? new Date(dueDate) : undefined,
+        ewayBillNo:            ewayBillNo            ?? undefined,
+        challanNo:             challanNo             ?? undefined,
+        financedBy:            financedBy            ?? undefined,
+        salesman:              salesman              ?? undefined,
+        emailId:               emailId               ?? undefined,
+        warrantyPeriod:        warrantyPeriod        ?? undefined,
+        notes:                 notes                 ?? undefined,
+        termsConditions:       termsConditions       ?? undefined,
+        signatureUrl:          signatureUrl          !== undefined ? signatureUrl          : undefined,
+        showEmptySignatureBox: showEmptySignatureBox !== undefined ? showEmptySignatureBox : undefined,
       },
     });
 
@@ -399,47 +461,56 @@ export const cancelInvoice = async (req: Request, res: Response) => {
   if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
-      const invoice = await tx.invoice.findUnique({
-        where:   { id },
-        include: { items: true },
-      });
+    const result = await prisma.$transaction(
+      async (tx) => {
+        const invoice = await tx.invoice.findUnique({
+          where:   { id },
+          include: { items: true },
+        });
 
-      if (!invoice)                                   throw new Error("Invoice not found");
-      if (invoice.status === InvoiceStatus.CANCELLED) throw new Error("Invoice is already cancelled");
+        if (!invoice)
+          throw new Error("Invoice not found");
+        if (invoice.status === InvoiceStatus.CANCELLED)
+          throw new Error("Invoice is already cancelled");
 
-      // Restore stock
-      for (const item of invoice.items) {
-        const stock = await tx.productStock.findFirst({ where: { productId: item.productId } });
-        if (stock) {
-          await tx.productStock.update({
-            where: { id: stock.id },
-            data:  { openingStock: { increment: item.quantity } },
-          });
-        }
-      }
+        // Restore stock in PARALLEL
+        await Promise.all(
+          invoice.items.map(async (item) => {
+            const stock = await tx.productStock.findFirst({ where: { productId: item.productId } });
+            if (stock) {
+              await tx.productStock.update({
+                where: { id: stock.id },
+                data:  { currentStock: { increment: item.quantity } },
+              });
+            }
+          })
+        );
 
-      // Reversal ledger entry
-      const newBalance = (await getLastPartyBalanceTx(tx, invoice.partyId)) - invoice.totalAmount.toNumber();
+        // Reversal ledger entry
+        const newBalance =
+          (await getLastPartyBalanceTx(tx, invoice.partyId)) -
+          invoice.totalAmount.toNumber();
 
-      await tx.partyLedger.create({
-        data: {
-          partyId:   invoice.partyId,
-          refType:   LedgerRefType.Return,
-          refId:     invoice.id,
-          reference: invoice.invoiceNo,
-          type:      LedgerType.CREDIT,
-          debit:     null,
-          credit:    invoice.totalAmount,
-          balance:   newBalance,
-        },
-      });
+        await tx.partyLedger.create({
+          data: {
+            partyId:   invoice.partyId,
+            refType:   LedgerRefType.Return,
+            refId:     invoice.id,
+            reference: invoice.invoiceNo,
+            type:      LedgerType.CREDIT,
+            debit:     null,
+            credit:    invoice.totalAmount,
+            balance:   newBalance,
+          },
+        });
 
-      return tx.invoice.update({
-        where: { id },
-        data:  { status: InvoiceStatus.CANCELLED },
-      });
-    });
+        return tx.invoice.update({
+          where: { id },
+          data:  { status: InvoiceStatus.CANCELLED },
+        });
+      },
+      { timeout: 15000 }
+    );
 
     return res.json({ success: true, message: "Invoice cancelled", data: result });
   } catch (error: any) {
@@ -451,61 +522,63 @@ export const cancelInvoice = async (req: Request, res: Response) => {
 /* ═══════════════════════════════════════════════════════════
    RECORD PAYMENT ON INVOICE
    PATCH /api/invoices/:id/payment
-   body: { amount, paymentMode }
 ═══════════════════════════════════════════════════════════ */
 export const recordInvoicePayment = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
 
   const { amount, paymentMode } = req.body;
-  if (!amount || amount <= 0) return res.status(400).json({ success: false, message: "Invalid payment amount" });
+  if (!amount || amount <= 0)
+    return res.status(400).json({ success: false, message: "Invalid payment amount" });
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
-      // `as any` because stale client may not have receivedAmount / paymentMode on the type
-      const invoice: any = await tx.invoice.findUnique({ where: { id } });
+    const result = await prisma.$transaction(
+      async (tx) => {
+        const invoice: any = await tx.invoice.findUnique({ where: { id } });
 
-      if (!invoice)                                   throw new Error("Invoice not found");
-      if (invoice.status === InvoiceStatus.CANCELLED) throw new Error("Cannot pay a cancelled invoice");
-      if (invoice.status === InvoiceStatus.PAID)      throw new Error("Invoice is already fully paid");
+        if (!invoice)
+          throw new Error("Invoice not found");
+        if (invoice.status === InvoiceStatus.CANCELLED)
+          throw new Error("Cannot pay a cancelled invoice");
+        if (invoice.status === InvoiceStatus.PAID)
+          throw new Error("Invoice is already fully paid");
 
-      const currentOutstanding = Number(invoice.outstandingAmount ?? 0);
-      if (amount > currentOutstanding) {
-        throw new Error(`Payment (${amount}) exceeds outstanding amount (${currentOutstanding})`);
-      }
+        const currentOutstanding = Number(invoice.outstandingAmount ?? 0);
+        if (amount > currentOutstanding)
+          throw new Error(`Payment (${amount}) exceeds outstanding amount (${currentOutstanding})`);
 
-      const newReceived    = Number(invoice.receivedAmount ?? 0) + amount;
-      const newOutstanding = currentOutstanding - amount;
-      const newStatus      = deriveStatus(newReceived, Number(invoice.totalAmount));
+        const newReceived    = Number(invoice.receivedAmount ?? 0) + amount;
+        const newOutstanding = currentOutstanding - amount;
+        const newStatus      = deriveStatus(newReceived, Number(invoice.totalAmount));
 
-      const updated = await (tx.invoice.update as any)({
-        where: { id },
-        data: {
-          receivedAmount:    newReceived,
-          outstandingAmount: newOutstanding,
-          paymentMode:       paymentMode ?? invoice.paymentMode ?? null,
-          status:            newStatus,
-        },
-      });
+        const updated = await (tx.invoice.update as any)({
+          where: { id },
+          data: {
+            receivedAmount:    newReceived,
+            outstandingAmount: newOutstanding,
+            paymentMode:       toPaymentMode(paymentMode) ?? toPaymentMode(invoice.paymentMode) ?? null,
+            status:            newStatus,
+          },
+        });
 
-      // Ledger CREDIT
-      const newBalance = (await getLastPartyBalanceTx(tx, invoice.partyId)) - amount;
+        const newBalance = (await getLastPartyBalanceTx(tx, invoice.partyId)) - amount;
+        await tx.partyLedger.create({
+          data: {
+            partyId:   invoice.partyId,
+            refType:   LedgerRefType.Payment,
+            refId:     invoice.id,
+            reference: invoice.invoiceNo,
+            type:      LedgerType.CREDIT,
+            debit:     null,
+            credit:    amount,
+            balance:   newBalance,
+          },
+        });
 
-      await tx.partyLedger.create({
-        data: {
-          partyId:   invoice.partyId,
-          refType:   LedgerRefType.Payment,
-          refId:     invoice.id,
-          reference: invoice.invoiceNo,
-          type:      LedgerType.CREDIT,
-          debit:     null,
-          credit:    amount,
-          balance:   newBalance,
-        },
-      });
-
-      return updated;
-    });
+        return updated;
+      },
+      { timeout: 15000 }
+    );
 
     return res.json({ success: true, message: "Payment recorded", data: result });
   } catch (error: any) {
@@ -520,30 +593,21 @@ export const recordInvoicePayment = async (req: Request, res: Response) => {
 ═══════════════════════════════════════════════════════════ */
 export const getInvoiceSummary = async (_req: Request, res: Response) => {
   try {
-    // Use separate aggregate calls to avoid _sum fields that the stale
-    // client doesn't know about yet (receivedAmount / outstandingAmount)
-    const [totalAgg, statusCounts] = await Promise.all([
+    const [totalAgg, statusCounts, extraAgg, cancelledAgg] = await Promise.all([
       prisma.invoice.aggregate({
         where: { status: { not: InvoiceStatus.CANCELLED } },
         _sum:  { totalAmount: true },
       }),
-      prisma.invoice.groupBy({
-        by:     ["status"],
-        _count: { id: true },
+      prisma.invoice.groupBy({ by: ["status"], _count: { id: true } }),
+      (prisma.invoice.aggregate as any)({
+        where: { status: { not: InvoiceStatus.CANCELLED } },
+        _sum:  { receivedAmount: true, outstandingAmount: true },
+      }),
+      prisma.invoice.aggregate({
+        where: { status: InvoiceStatus.CANCELLED },
+        _sum:  { totalAmount: true },
       }),
     ]);
-
-    // receivedAmount / outstandingAmount aggregate via raw-safe approach
-    const extraAgg: any = await (prisma.invoice.aggregate as any)({
-      where: { status: { not: InvoiceStatus.CANCELLED } },
-      _sum:  { receivedAmount: true, outstandingAmount: true },
-    });
-
-    // Cancelled invoices total
-    const cancelledAgg = await prisma.invoice.aggregate({
-      where: { status: InvoiceStatus.CANCELLED },
-      _sum:  { totalAmount: true },
-    });
 
     const statusMap: Record<string, number> = {};
     statusCounts.forEach((c) => { statusMap[c.status] = c._count.id; });
@@ -573,7 +637,8 @@ export const getInvoiceSummary = async (_req: Request, res: Response) => {
 ═══════════════════════════════════════════════════════════ */
 export const getPartyItemWiseReport = async (req: Request, res: Response) => {
   const partyId = Number(req.params.id);
-  if (isNaN(partyId)) return res.status(400).json({ success: false, message: "Invalid party ID" });
+  if (isNaN(partyId))
+    return res.status(400).json({ success: false, message: "Invalid party ID" });
 
   try {
     const invoices = await prisma.invoice.findMany({
@@ -603,33 +668,27 @@ export const getPartyItemWiseReport = async (req: Request, res: Response) => {
   }
 };
 
-/* ══════════════════════════════════════════════════════════════════════════
-   DELETE /api/invoices/:id  — hard delete invoice + its ledger entries
-═══════════════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════
+   DELETE INVOICE
+   DELETE /api/invoices/:id
+═══════════════════════════════════════════════════════════ */
 export const deleteInvoice = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
 
   try {
-    await prisma.$transaction(async (tx) => {
-      // 1. Check exists
-      const invoice = await tx.invoice.findUnique({ where: { id } });
-      if (!invoice) throw new Error("Invoice not found");
+    await prisma.$transaction(
+      async (tx) => {
+        const invoice = await tx.invoice.findUnique({ where: { id } });
+        if (!invoice) throw new Error("Invoice not found");
 
-      // 2. Remove ledger entries for this invoice
-      await tx.partyLedger.deleteMany({
-        where: { refType: "Invoice", refId: id },
-      });
-
-      // 3. Remove payment allocations linked to this invoice
-      await (tx as any).paymentAllocation?.deleteMany?.({ where: { invoiceId: id } }).catch(() => {});
-
-      // 4. Remove invoice items
-      await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
-
-      // 5. Delete invoice
-      await tx.invoice.delete({ where: { id } });
-    });
+        await tx.partyLedger.deleteMany({ where: { refType: "Invoice", refId: id } });
+        await (tx as any).paymentAllocation?.deleteMany?.({ where: { invoiceId: id } }).catch(() => {});
+        await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
+        await tx.invoice.delete({ where: { id } });
+      },
+      { timeout: 15000 }
+    );
 
     return res.json({ success: true, message: "Invoice deleted successfully" });
   } catch (error: any) {

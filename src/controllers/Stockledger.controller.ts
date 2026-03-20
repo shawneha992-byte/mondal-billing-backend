@@ -2,16 +2,19 @@ import { Request, Response } from "express";
 import prisma from "../utils/prisma";
 import { StockRefType } from "@prisma/client";
 
-/* ═══════════════════════════════════════════════════════════
-   GET ALL STOCK LEDGER ENTRIES (paginated)
-   GET /api/stock-ledger
-═══════════════════════════════════════════════════════════ */
+/* ===========================================================
+   GET ALL STOCK LEDGER ENTRIES
+=========================================================== */
+
 export const getStockLedger = async (req: Request, res: Response) => {
   try {
     const { productId, godownId, from, to, page = 1, limit = 50 } = req.query;
+
     const where: any = {};
+
     if (productId) where.productId = Number(productId);
     if (godownId)  where.godownId  = Number(godownId);
+
     if (from || to) {
       where.date = {};
       if (from) where.date.gte = new Date(from as string);
@@ -22,151 +25,212 @@ export const getStockLedger = async (req: Request, res: Response) => {
       prisma.stockLedger.findMany({
         where,
         include: {
-          product: { select: { id: true, name: true, itemCode: true, unit: true } },
-          godown:  { select: { godown_id: true, godown_name: true } },
+          product: {
+            select: { id: true, name: true, itemCode: true, unit: true },
+          },
+          godown: {
+            select: { godown_id: true, godown_name: true },
+          },
         },
         orderBy: [{ date: "desc" }, { id: "desc" }],
-        skip:    (Number(page) - 1) * Number(limit),
-        take:    Number(limit),
+        skip: (Number(page) - 1) * Number(limit),
+        take: Number(limit),
       }),
+
       prisma.stockLedger.count({ where }),
     ]);
 
-    return res.json({
+    res.json({
       success: true,
-      data:    entries,
+      data: entries,
       total,
-      page:    Number(page),
-      pages:   Math.ceil(total / Number(limit)),
+      page:  Number(page),
+      pages: Math.ceil(total / Number(limit)),
     });
   } catch (error) {
-    console.error("❌ getStockLedger:", error);
+    console.error("getStockLedger:", error);
     res.status(500).json({ success: false, message: "Failed to fetch stock ledger" });
   }
 };
 
-/* ═══════════════════════════════════════════════════════════
-   GET FULL LEDGER FOR ONE PRODUCT (with running balance)
-   GET /api/stock-ledger/product/:productId
-═══════════════════════════════════════════════════════════ */
+/* ===========================================================
+   GET PRODUCT STOCK LEDGER
+=========================================================== */
+
 export const getProductStockLedger = async (req: Request, res: Response) => {
   try {
     const productId = Number(req.params.productId);
-    const { godownId, from, to } = req.query;
+    const { godownId } = req.query;
 
     const where: any = { productId };
+
     if (godownId) where.godownId = Number(godownId);
-    if (from || to) {
-      where.date = {};
-      if (from) where.date.gte = new Date(from as string);
-      if (to)   where.date.lte = new Date((to as string) + "T23:59:59");
-    }
 
     const product = await prisma.product.findUnique({
-      where:  { id: productId },
+      where: { id: productId },
       select: { id: true, name: true, itemCode: true, unit: true },
     });
-    if (!product) return res.status(404).json({ success: false, message: "Product not found" });
+
+    if (!product) {
+      return res.status(404).json({ success: false, message: "Product not found" });
+    }
 
     const entries = await prisma.stockLedger.findMany({
       where,
-      include: { godown: { select: { godown_id: true, godown_name: true } } },
+      include: {
+        godown: { select: { godown_name: true } },
+      },
       orderBy: [{ date: "asc" }, { id: "asc" }],
     });
 
-    // ✅ Use currentStock (live balance), not openingStock
     const stocks = await prisma.productStock.findMany({
-      where:   { productId },
-      include: { godown: { select: { godown_name: true } } },
+      where: { productId },
     });
-   const currentStock = stocks.reduce(
-  (s, st) =>
-    s +
-    Number(st.currentStock ?? st.openingStock ?? 0),
-  0
-);
 
-    return res.json({ success: true, product, currentStock, data: entries });
+    const currentStock = stocks.reduce(
+      (sum, s) => sum + Number(s.currentStock ?? s.openingStock ?? 0),
+      0
+    );
+
+    /* FORMAT LEDGER FOR UI */
+
+    const formattedEntries = entries.map((e) => {
+
+      let transactionType = e.remarks || "Adjustment";
+
+      switch (e.refType) {
+        case StockRefType.OPENING:
+          transactionType = "Opening Stock";
+          break;
+        case StockRefType.PURCHASE:
+          transactionType = "Purchase Invoice";
+          break;
+        case StockRefType.SALE:
+          transactionType = "Sales Invoice";
+          break;
+        case StockRefType.ADJUSTMENT:
+          transactionType = "Stock Adjustment";
+          break;
+        case StockRefType.PURCHASE_RETURN:
+          transactionType = "Purchase Return";
+          break;
+      }
+
+      const quantity =
+        e.quantityIn && e.quantityIn > 0
+          ? `+${e.quantityIn}`
+          : `-${e.quantityOut ?? 0}`;
+
+      return {
+        id:             e.id,
+        date:           e.date,
+        transactionType,
+        quantity,
+        invoiceNumber:  e.refId ?? "-",
+        closingStock:   e.balance,
+        godown:         e.godown?.godown_name ?? null,
+        remarks:        e.remarks,
+      };
+    });
+
+    res.json({
+      success: true,
+      product,
+      currentStock,
+      data: formattedEntries,
+    });
+
   } catch (error) {
-    console.error("❌ getProductStockLedger:", error);
+    console.error("getProductStockLedger:", error);
     res.status(500).json({ success: false, message: "Failed to fetch product stock ledger" });
   }
 };
 
-/* ═══════════════════════════════════════════════════════════
+/* ===========================================================
    CREATE MANUAL STOCK ADJUSTMENT
-   POST /api/stock-ledger/adjustment
-═══════════════════════════════════════════════════════════ */
+=========================================================== */
+
 export const createStockAdjustment = async (req: Request, res: Response) => {
   try {
     const { productId, godownId, quantityIn, quantityOut, remarks } = req.body;
 
-    if (!productId) {
-      return res.status(400).json({ success: false, message: "productId is required" });
+    if (!productId || !godownId) {
+      return res.status(400).json({
+        success: false,
+        message: "productId and godownId are required",
+      });
     }
 
+    const qIn  = Number(quantityIn  || 0);
+    const qOut = Number(quantityOut || 0);
+
     const result = await prisma.$transaction(async (tx) => {
-      const stock = godownId
-        ? await tx.productStock.findUnique({
-            where: { productId_godownId: { productId: Number(productId), godownId: Number(godownId) } },
-          })
-        : await tx.productStock.findFirst({ where: { productId: Number(productId) } });
 
-      // ✅ FIX: use currentStock as live balance
-     const currentBalance = stock ? Number(stock.currentStock ?? stock.openingStock ?? 0): 0;
+      let stock = await tx.productStock.findUnique({
+        where: {
+          productId_godownId: {
+            productId: Number(productId),
+            godownId:  Number(godownId),
+          },
+        },
+      });
 
-      const qIn  = Number(quantityIn  || 0);
-      const qOut = Number(quantityOut || 0);
-      if (currentBalance + qIn - qOut < 0) {
-  throw new Error("Stock cannot be negative");
-}
+      if (!stock) {
+        stock = await tx.productStock.create({
+          data: {
+            productId:    Number(productId),
+            godownId:     Number(godownId),
+            openingStock: 0,
+            currentStock: 0,
+            asOfDate:     new Date(),
+          },
+        });
+      }
 
-const newBalance = currentBalance + qIn - qOut;
+      const currentBalance = Number(stock.currentStock ?? stock.openingStock ?? 0);
+      const newBalance     = currentBalance + qIn - qOut;
 
-        const finalGodownId =
-          godownId ? Number(godownId) : stock?.godownId;
+      if (newBalance < 0) {
+        throw new Error("Stock cannot be negative");
+      }
 
-        if (!finalGodownId) {
-          throw new Error("godownId is required for stock adjustment");
-        }
+      await tx.productStock.update({
+        where: { id: stock.id },
+        data:  { currentStock: newBalance },
+      });
 
-      // Write StockLedger entry
-      const entry = await tx.stockLedger.create({
+      // FIX: pass explicit integers (0 instead of undefined) to avoid runtime errors
+      const ledgerEntry = await tx.stockLedger.create({
         data: {
           productId:   Number(productId),
-         godownId: finalGodownId,
+          godownId:    Number(godownId),
           date:        new Date(),
           refType:     StockRefType.ADJUSTMENT,
-         quantityIn:  qIn  > 0 ? qIn  : undefined,
-        quantityOut: qOut > 0 ? qOut : undefined,
-
+          quantityIn:  qIn  > 0 ? qIn  : 0,
+          quantityOut: qOut > 0 ? qOut : 0,
           balance:     newBalance,
           remarks:     remarks || "Manual Adjustment",
         },
       });
 
-      // ✅ FIX: update currentStock ONLY — openingStock is the original entry, never touch it
-      if (stock) {
-        await tx.productStock.update({
-          where: { id: stock.id },
-          data:  { currentStock: newBalance },
-        });
-      }
-
-      return entry;
+      return ledgerEntry;
     });
 
-    return res.status(201).json({ success: true, data: result });
-  } catch (error) {
-    console.error("❌ createStockAdjustment:", error);
-    res.status(500).json({ success: false, message: "Failed to create stock adjustment" });
+    res.status(201).json({ success: true, data: result });
+
+  } catch (error: any) {
+    console.error("createStockAdjustment:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to create stock adjustment",
+    });
   }
 };
 
-/* ═══════════════════════════════════════════════════════════
-   STOCK SUMMARY  (current levels across all products)
-   GET /api/stock-ledger/summary
-═══════════════════════════════════════════════════════════ */
+/* ===========================================================
+   STOCK SUMMARY
+=========================================================== */
+
 export const getStockSummary = async (req: Request, res: Response) => {
   try {
     const stocks = await prisma.productStock.findMany({
@@ -183,28 +247,28 @@ export const getStockSummary = async (req: Request, res: Response) => {
     });
 
     const summary = stocks.map((s) => {
-      // ✅ Use currentStock as the live balance
-      const liveStock = s.currentStock ?? s.openingStock;
+      const liveStock = Number(s.currentStock ?? s.openingStock ?? 0);
+
       return {
-        productId:    s.productId,
-        productName:  s.product.name,
-        itemCode:     s.product.itemCode,
-        unit:         s.product.unit,
-        godownName:   s.godown.godown_name,
-        currentStock: liveStock,
-        openingStock: s.openingStock,
+        productId:     s.productId,
+        productName:   s.product.name,
+        itemCode:      s.product.itemCode,
+        unit:          s.product.unit,
+        godownName:    s.godown.godown_name,
+        openingStock:  Number(s.openingStock),
+        currentStock:  liveStock,
         lowStockAlert: s.product.lowStockAlert,
         lowStockQty:   s.product.lowStockQty,
-        isLowStock:   s.product.lowStockAlert
-          ? Number(liveStock) <= (s.product.lowStockQty ?? 0)
-
+        isLowStock:    s.product.lowStockAlert
+          ? liveStock <= Number(s.product.lowStockQty ?? 0)
           : false,
       };
     });
 
-    return res.json({ success: true, data: summary });
+    res.json({ success: true, data: summary });
+
   } catch (error) {
-    console.error("❌ getStockSummary:", error);
+    console.error("getStockSummary:", error);
     res.status(500).json({ success: false, message: "Failed to fetch stock summary" });
   }
 };

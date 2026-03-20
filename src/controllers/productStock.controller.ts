@@ -1,7 +1,6 @@
 import { Request, Response } from "express";
-import { PrismaClient, StockRefType } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { StockRefType } from "@prisma/client";
+import prisma from "../utils/prisma";
 
 /* ═══════════════════════════════════════════════════════════
    CREATE PRODUCT STOCK  (Opening stock entry)
@@ -17,19 +16,19 @@ export const createProductStock = async (req: Request, res: Response) => {
 
     const qty = Number(openingStock || 0);
 
-    // ✅ FIX: set currentStock = openingStock + write OPENING StockLedger entry
     const stock = await prisma.$transaction(async (tx) => {
       const created = await tx.productStock.create({
         data: {
           productId:    Number(productId),
           godownId:     Number(godownId),
           openingStock: qty,
-          currentStock: qty,              // ← currentStock starts equal to openingStock
+          currentStock: qty,
           asOfDate:     asOfDate ? new Date(asOfDate) : new Date(),
         },
       });
 
       if (qty > 0) {
+        // FIX: explicit 0 for quantityOut (schema Int field — undefined causes runtime error)
         await tx.stockLedger.create({
           data: {
             productId:   Number(productId),
@@ -38,8 +37,7 @@ export const createProductStock = async (req: Request, res: Response) => {
             refType:     StockRefType.OPENING,
             refId:       null,
             quantityIn:  qty,
-            quantityOut: undefined,
-
+            quantityOut: 0,
             balance:     qty,
             remarks:     "Opening stock",
           },
@@ -113,7 +111,7 @@ export const updateProductStock = async (req: Request, res: Response) => {
       where: { id },
       data: {
         openingStock: Number(openingStock),
-        currentStock: { increment: diff }, // adjusts balance safely
+        currentStock: { increment: diff },
         asOfDate: asOfDate ? new Date(asOfDate) : undefined,
       },
     });

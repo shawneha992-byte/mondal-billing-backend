@@ -33,8 +33,8 @@ export const createParty = async (req: Request, res: Response) => {
       creditLimit,
       openingBalance,
       openingBalanceType,
-      bankAccounts = [],
-      customFields = [],
+      bankAccounts  = [],
+      customFields  = [],
     } = req.body;
 
     if (!partyName || !partyType) {
@@ -45,17 +45,11 @@ export const createParty = async (req: Request, res: Response) => {
     }
 
     if (gstin && !validateGST(gstin)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid GST number format",
-      });
+      return res.status(400).json({ success: false, message: "Invalid GST number format" });
     }
 
     if (panNumber && !validatePAN(panNumber)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid PAN number format",
-      });
+      return res.status(400).json({ success: false, message: "Invalid PAN number format" });
     }
 
     if (openingBalance && !openingBalanceType) {
@@ -87,25 +81,22 @@ export const createParty = async (req: Request, res: Response) => {
       gstData = await fetchGSTDetails(gstin);
 
       if (!gstData) {
-        return res.status(400).json({
-          success: false,
-          message: "GSTIN not found or inactive",
-        });
+        return res.status(400).json({ success: false, message: "GSTIN not found or inactive" });
       }
     }
 
     const party = await prisma.$transaction(async (tx) => {
       const newParty = await tx.party.create({
         data: {
-          name: gstData?.legal_name || partyName,
-          partyName: gstData?.legal_name || partyName,
+          name:               gstData?.legal_name || partyName,
+          partyName:          gstData?.legal_name || partyName,
           mobileNumber,
           email,
           gstin,
           panNumber,
           partyType,
           partyCategory,
-          billingAddress: gstData?.address || billingAddress,
+          billingAddress:     gstData?.address || billingAddress,
           shippingAddress,
           creditPeriod,
           creditLimit,
@@ -121,9 +112,9 @@ export const createParty = async (req: Request, res: Response) => {
           data: {
             partyId: newParty.id,
             refType: LedgerRefType.Opening,
-            type: isDebit ? LedgerType.DEBIT : LedgerType.CREDIT,
-            debit: isDebit ? openingBalance : null,
-            credit: isDebit ? null : openingBalance,
+            type:    isDebit ? LedgerType.DEBIT : LedgerType.CREDIT,
+            debit:   isDebit ? openingBalance : null,
+            credit:  isDebit ? null : openingBalance,
             balance: openingBalance,
           },
         });
@@ -132,13 +123,13 @@ export const createParty = async (req: Request, res: Response) => {
       if (bankAccounts.length > 0) {
         await tx.partyBankAccount.createMany({
           data: bankAccounts.map((acc: any) => ({
-            partyId: newParty.id,
+            partyId:       newParty.id,
             accountHolder: acc.accountHolder,
             accountNumber: acc.accountNumber,
-            bankName: acc.bankName,
-            ifscCode: acc.ifscCode.toUpperCase(),
-            branchName: acc.branchName || null,
-            upiId: acc.upiId || null,
+            bankName:      acc.bankName,
+            ifscCode:      acc.ifscCode.toUpperCase(),
+            branchName:    acc.branchName || null,
+            upiId:         acc.upiId     || null,
           })),
         });
       }
@@ -146,8 +137,8 @@ export const createParty = async (req: Request, res: Response) => {
       if (customFields.length > 0) {
         await tx.partyCustomField.createMany({
           data: customFields.map((field: any) => ({
-            partyId: newParty.id,
-            fieldName: field.fieldName,
+            partyId:    newParty.id,
+            fieldName:  field.fieldName,
             fieldValue: field.fieldValue,
           })),
         });
@@ -157,7 +148,7 @@ export const createParty = async (req: Request, res: Response) => {
     });
 
     const fullParty = await prisma.party.findUnique({
-      where: { id: party.id },
+      where:   { id: party.id },
       include: {
         bankAccounts: { orderBy: { createdAt: "asc" } },
         customFields: { orderBy: { createdAt: "asc" } },
@@ -167,7 +158,7 @@ export const createParty = async (req: Request, res: Response) => {
     return res.status(201).json({
       success: true,
       message: "Party created successfully",
-      data: fullParty,
+      data:    fullParty,
     });
 
   } catch (error) {
@@ -180,22 +171,57 @@ export const createParty = async (req: Request, res: Response) => {
 // ======================================================
 // UPDATE PARTY
 // PUT /api/parties/:id
+// FIX: whitelist only known Party fields to prevent Prisma errors
 // ======================================================
 
 export const updateParty = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
 
+    const {
+      partyName,
+      mobileNumber,
+      email,
+      gstin,
+      panNumber,
+      partyType,
+      partyCategory,
+      billingAddress,
+      shippingAddress,
+      creditPeriod,
+      creditLimit,
+      openingBalance,
+      openingBalanceType,
+      status,
+      contactPersonName,
+      dateOfBirth,
+    } = req.body;
+
+    // Build update payload with only defined fields
+    const data: any = {};
+    if (partyName         !== undefined) { data.name = partyName; data.partyName = partyName; }
+    if (mobileNumber      !== undefined) data.mobileNumber      = mobileNumber;
+    if (email             !== undefined) data.email             = email;
+    if (gstin             !== undefined) data.gstin             = gstin;
+    if (panNumber         !== undefined) data.panNumber         = panNumber;
+    if (partyType         !== undefined) data.partyType         = partyType;
+    if (partyCategory     !== undefined) data.partyCategory     = partyCategory;
+    if (billingAddress    !== undefined) data.billingAddress    = billingAddress;
+    if (shippingAddress   !== undefined) data.shippingAddress   = shippingAddress;
+    if (creditPeriod      !== undefined) data.creditPeriod      = creditPeriod;
+    if (creditLimit       !== undefined) data.creditLimit       = creditLimit;
+    if (openingBalance    !== undefined) data.openingBalance    = openingBalance;
+    if (openingBalanceType !== undefined) data.openingBalanceType = openingBalanceType;
+    if (status            !== undefined) data.status            = status;
+    if (contactPersonName !== undefined) data.contactPersonName = contactPersonName;
+    if (dateOfBirth       !== undefined) data.dateOfBirth       = dateOfBirth;
+
     const party = await prisma.party.update({
       where: { id },
-      data: req.body,
+      data,
     });
 
-    return res.json({
-      success: true,
-      message: "Party updated",
-      data: party,
-    });
+    return res.json({ success: true, message: "Party updated", data: party });
 
   } catch (error) {
     console.error("Update Party Error:", error);
@@ -234,7 +260,7 @@ export const getPartyById = async (req: Request, res: Response) => {
     const id = Number(req.params.id);
 
     const party = await prisma.party.findUnique({
-      where: { id },
+      where:   { id },
       include: {
         bankAccounts: { orderBy: { createdAt: "asc" } },
         customFields: { orderBy: { createdAt: "asc" } },
@@ -242,10 +268,7 @@ export const getPartyById = async (req: Request, res: Response) => {
     });
 
     if (!party) {
-      return res.status(404).json({
-        success: false,
-        message: "Party not found",
-      });
+      return res.status(404).json({ success: false, message: "Party not found" });
     }
 
     res.json({ success: true, data: party });
@@ -266,14 +289,9 @@ export const deleteParty = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
 
-    await prisma.party.delete({
-      where: { id },
-    });
+    await prisma.party.delete({ where: { id } });
 
-    res.json({
-      success: true,
-      message: "Party deleted successfully",
-    });
+    res.json({ success: true, message: "Party deleted successfully" });
 
   } catch (error) {
     console.error("Delete Party Error:", error);

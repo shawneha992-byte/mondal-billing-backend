@@ -16,13 +16,16 @@ import quotationRoutes       from "./quotation.routes";
 import productStockRoutes    from "./productStock.routes";
 import stockLedgerRoutes     from "./StockLedger.routes";
 import invoiceSettingsRoutes from "./invoiceSettings.route";
-
+import paymentOutRoutes from "./paymentOut.routes";
+import purchaseOrderRoutes from "./purchaseOrder.routes";
+import accountsRoutes from "./accounts.routes"
 const router = Router();
 
 router.use("/auth",              authRoutes);
 router.use("/items",             itemRoutes);
 router.use("/invoices",          invoiceRoutes);
 router.use("/parties",           partyRoutes);
+router.use("/accounts",accountsRoutes);
 router.use("/party-ledger",      partyLedgerRoutes);
 router.use("/payments-in",       paymentInRoutes);
 router.use("/sales-return",      salesReturnRoutes);
@@ -35,5 +38,6 @@ router.use("/quotations",        quotationRoutes);
 router.use("/product-stocks",    productStockRoutes);       // ← ADD: stock opening management
 router.use("/stock-ledger",      stockLedgerRoutes);        // ← ADD: stock history / audit
 router.use("/invoice-settings",  invoiceSettingsRoutes);    // ← ADD: prefix / sequence settings
-
+router.use("/payment-out", paymentOutRoutes);
+router.use("/purchase-orders", purchaseOrderRoutes)
 export default router;
