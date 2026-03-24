@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import authRoutes            from "./auth.routes";
 import itemRoutes            from "./item.routes";
+import invoiceDetailsSettingsRouter from "./invoicedetailssettings.routes";
 import invoiceRoutes         from "./invoice.routes";
 import partyRoutes           from "./party.routes";
 import partyLedgerRoutes     from "./partyLedger.routes";
@@ -23,6 +24,7 @@ const router = Router();
 
 router.use("/auth",              authRoutes);
 router.use("/items",             itemRoutes);
+router.use("/invoice-details-settings", invoiceDetailsSettingsRouter);
 router.use("/invoices",          invoiceRoutes);
 router.use("/parties",           partyRoutes);
 router.use("/accounts",accountsRoutes);

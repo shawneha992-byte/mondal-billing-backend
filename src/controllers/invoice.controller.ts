@@ -26,17 +26,18 @@ const toPaymentMode = (mode?: string): PaymentMode | null => {
   return map[mode.trim().toLowerCase()] ?? PaymentMode.CASH;
 };
 
+/**
+ * Extract numeric tax rate from a label like "GST 18%" → 18
+ * Returns 0 for "No Tax Applicable" or any unrecognised string.
+ */
+function extractTaxRate(taxLabel: string): number {
+  const m = (taxLabel ?? "").match(/(\d+)%/);
+  return m ? Number(m[1]) : 0;
+}
+
 /* ═══════════════════════════════════════════════════════════
    CREATE INVOICE
    POST /api/invoices
-   FIX 1: timeout: 15000 on $transaction
-   FIX 2: product validation & totals computed BEFORE entering tx
-   FIX 3: parallel stock updates via Promise.all inside tx
-   FIX 4: StockLedger writes moved OUTSIDE tx (non-critical)
-   FIX 5: InvoiceSettings sequence updated via atomic increment
-   FIX 6: discountPct now saved per line item so discount shows on bill
-   FIX 7: line item `total` is now post-discount + tax (not gross)
-   FIX 8: subtotal/taxAmount computed correctly after per-item discount
 ═══════════════════════════════════════════════════════════ */
 export const createInvoice = async (req: Request, res: Response) => {
   const {
@@ -62,6 +63,14 @@ export const createInvoice = async (req: Request, res: Response) => {
     autoRoundOff       = false,
     signatureUrl,
     showEmptySignatureBox = false,
+    // ── NEW extended fields ──────────────────────────────────
+    poNumber,
+    vehicleNo,
+    dispatchedThrough,
+    transportName,
+    customFieldValues,
+    paymentDetails,
+    financeDetails,
   } = req.body;
 
   if (!partyId || !items || items.length === 0) {
@@ -89,7 +98,7 @@ export const createInvoice = async (req: Request, res: Response) => {
       }
     }
 
-    // Pre-fetch stocks for all product items (only Products, not Services)
+    // Pre-fetch stocks for product items only (not Services)
     const productTypeItems = items.filter((i: any) => productMap.get(i.productId)?.itemType === "Product");
 
     const stockChecks = await Promise.all(
@@ -117,8 +126,7 @@ export const createInvoice = async (req: Request, res: Response) => {
       }
     }
 
-    // ── Compute totals OUTSIDE tx (pure CPU, no DB) ──────────────────────────
-    // FIX: each line's taxable base is AFTER its own discount (pct + flat)
+    // ── Compute line-item totals OUTSIDE tx ──────────────────────────────────
     let subTotal  = 0;
     let taxAmount = 0;
 
@@ -126,27 +134,32 @@ export const createInvoice = async (req: Request, res: Response) => {
       const lineGross     = Number(item.price) * Number(item.quantity);
       const discPct       = Number(item.discountPct ?? 0);
       const discAmt       = Number(item.discount    ?? 0);
-      // pct discount applies to gross; flat discount is additive on top
       const totalDiscount = Math.round((lineGross * (discPct / 100) + discAmt) * 100) / 100;
       const taxableBase   = Math.max(0, lineGross - totalDiscount);
       const lineTax       = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
-      subTotal  += taxableBase;   // subtotal = sum of (post-discount, pre-tax) line bases
+      subTotal  += taxableBase;
       taxAmount += lineTax;
     }
 
+    // ── Additional charges total — now includes tax on each charge ────────────
     const additionalChargesTotal: number = additionalCharges.reduce(
-      (sum: number, c: { name: string; amount: number }) => sum + (c.amount ?? 0),
+      (sum: number, c: { name: string; amount: number; taxLabel?: string }) => {
+        const rate   = extractTaxRate(c.taxLabel ?? "");
+        const taxAmt = Math.round((c.amount ?? 0) * rate / 100 * 100) / 100;
+        return sum + (c.amount ?? 0) + taxAmt;
+      },
       0
     );
-    const taxableAmount     = subTotal - Number(discountAmount);  // invoice-level discount
+
+    const taxableAmount     = subTotal - Number(discountAmount);
     const totalAmount       = taxableAmount + taxAmount + additionalChargesTotal + Number(roundOff);
     const outstandingAmount = totalAmount - Number(receivedAmount);
 
     // ── Build invoice number OUTSIDE tx ──────────────────────────────────────
-    const usePrefix  = invoiceSettings?.enablePrefix ?? false;
-    const prefix     = usePrefix && invoiceSettings?.prefix?.trim()
-                         ? invoiceSettings.prefix.trim()
-                         : "INV-";
+    const usePrefix       = invoiceSettings?.enablePrefix ?? false;
+    const prefix          = usePrefix && invoiceSettings?.prefix?.trim()
+                              ? invoiceSettings.prefix.trim()
+                              : "INV-";
     const seqFromSettings = invoiceSettings?.sequenceNumber ?? 1;
 
     const allNos = await prisma.invoice.findMany({ select: { invoiceNo: true } });
@@ -157,7 +170,7 @@ export const createInvoice = async (req: Request, res: Response) => {
         if (m) maxExistingSeq = Math.max(maxExistingSeq, parseInt(m[1], 10));
       }
     }
-    let nextSeq = Math.max(seqFromSettings, maxExistingSeq + 1);
+    let nextSeq   = Math.max(seqFromSettings, maxExistingSeq + 1);
     let invoiceNo = `${prefix}${String(nextSeq).padStart(5, "0")}`;
     while (await prisma.invoice.findUnique({ where: { invoiceNo } })) {
       nextSeq++;
@@ -174,7 +187,7 @@ export const createInvoice = async (req: Request, res: Response) => {
       const stock = stockChecks[i]!;
       const newBalance = Number(stock.currentStock ?? stock.openingStock ?? 0) - Number(item.quantity);
       stockUpdateMap.set(item.productId, {
-        stockId: stock.id,
+        stockId:   stock.id,
         newBalance,
         productId: item.productId,
         godownId:  stock.godownId,
@@ -184,7 +197,7 @@ export const createInvoice = async (req: Request, res: Response) => {
     // ── TRANSACTION — only critical DB writes ─────────────────────────────────
     const created = await prisma.$transaction(
       async (tx) => {
-        // 1. Create invoice + items + additional charges
+        // 1. Create invoice + items + additional charges (with taxLabel/taxAmount)
         const inv = await (tx.invoice.create as any)({
           data: {
             invoiceNo,
@@ -200,6 +213,15 @@ export const createInvoice = async (req: Request, res: Response) => {
             warrantyPeriod: warrantyPeriod ?? null,
             notes:          notes          ?? null,
             termsConditions: termsConditions ?? null,
+            // ── NEW extended fields ──────────────────────────────
+            poNumber:          poNumber          ?? null,
+            vehicleNo:         vehicleNo         ?? null,
+            dispatchedThrough: dispatchedThrough ?? null,
+            transportName:     transportName     ?? null,
+            customFieldValues: customFieldValues ?? {},
+            paymentDetails:    paymentDetails    ?? null,
+            financeDetails:    (financeDetails?.enabled === true) ? financeDetails : null,
+            // ── Financials ───────────────────────────────────────
             subTotal,
             taxableAmount,
             discountAmount,
@@ -216,7 +238,6 @@ export const createInvoice = async (req: Request, res: Response) => {
             showEmptySignatureBox: showEmptySignatureBox ?? false,
             status: deriveStatus(Number(receivedAmount), totalAmount),
             items: {
-              // FIX: store discountPct, correct flat discount ₹, and correct post-discount total
               create: items.map((item: any) => {
                 const lineGross     = Number(item.price) * Number(item.quantity);
                 const discPct       = Number(item.discountPct ?? 0);
@@ -232,19 +253,27 @@ export const createInvoice = async (req: Request, res: Response) => {
                   godownId:    item.godownId ?? null,
                   quantity:    item.quantity,
                   price:       item.price,
-                  discountPct: discPct,          // ← percentage saved for display on bill
-                  discount:    totalDiscount,    // ← total flat ₹ discount (pct-derived + fixed)
-                  taxRate:     item.taxRate   ?? 0,
+                  discountPct: discPct,
+                  discount:    totalDiscount,
+                  taxRate:     item.taxRate ?? 0,
                   taxAmount:   taxAmt,
-                  total:       lineTotal,        // ← post-discount + tax (correct net amount)
+                  total:       lineTotal,
                 };
               }),
             },
+            // ── Additional charges — now save taxLabel + taxAmount ──
             ...(additionalCharges.length > 0 && {
               additionalCharges: {
-                create: additionalCharges.map((c: { name: string; amount: number }) => ({
-                  name: c.name, amount: c.amount,
-                })),
+                create: additionalCharges.map((c: { name: string; amount: number; taxLabel?: string }) => {
+                  const rate   = extractTaxRate(c.taxLabel ?? "");
+                  const taxAmt = Math.round((c.amount ?? 0) * rate / 100 * 100) / 100;
+                  return {
+                    name:      c.name,
+                    amount:    c.amount,
+                    taxLabel:  c.taxLabel ?? "No Tax Applicable",
+                    taxAmount: taxAmt,
+                  };
+                }),
               },
             }),
           },
@@ -359,7 +388,6 @@ export const getInvoices = async (req: Request, res: Response) => {
       where,
       include: {
         party:             true,
-        // FIX: include discountPct in items so the bill can display it
         items:             { include: { product: true } },
         additionalCharges: true,
         allocations:       true,
@@ -390,7 +418,6 @@ export const getInvoiceById = async (req: Request, res: Response) => {
       where: { id },
       include: {
         party:             true,
-        // FIX: discountPct is now part of InvoiceItem — returned automatically
         items:             { include: { product: true } },
         additionalCharges: true,
         allocations:       true,
@@ -419,6 +446,14 @@ export const updateInvoice = async (req: Request, res: Response) => {
     salesman, emailId, warrantyPeriod,
     notes, termsConditions,
     signatureUrl, showEmptySignatureBox,
+    // ── NEW extended fields ──────────────────────────────────
+    poNumber,
+    vehicleNo,
+    dispatchedThrough,
+    transportName,
+    customFieldValues,
+    paymentDetails,
+    financeDetails,
   } = req.body;
 
   try {
@@ -442,6 +477,16 @@ export const updateInvoice = async (req: Request, res: Response) => {
         termsConditions:       termsConditions       ?? undefined,
         signatureUrl:          signatureUrl          !== undefined ? signatureUrl          : undefined,
         showEmptySignatureBox: showEmptySignatureBox !== undefined ? showEmptySignatureBox : undefined,
+        // ── NEW extended fields ──────────────────────────────
+        poNumber:          poNumber          !== undefined ? (poNumber          || null) : undefined,
+        vehicleNo:         vehicleNo         !== undefined ? (vehicleNo         || null) : undefined,
+        dispatchedThrough: dispatchedThrough !== undefined ? (dispatchedThrough || null) : undefined,
+        transportName:     transportName     !== undefined ? (transportName     || null) : undefined,
+        customFieldValues: customFieldValues !== undefined ? customFieldValues             : undefined,
+        paymentDetails:    paymentDetails    !== undefined ? (paymentDetails    || null) : undefined,
+        financeDetails:    financeDetails    !== undefined
+                             ? (financeDetails?.enabled === true ? financeDetails : null)
+                             : undefined,
       },
     });
 
