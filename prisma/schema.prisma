@@ -304,6 +304,15 @@ model Invoice {
   termsConditions        String?
   updatedAt              DateTime                  @updatedAt
   warrantyPeriod         String?
+
+poNumber          String?
+vehicleNo         String?
+dispatchedThrough String?
+transportName     String?
+customFieldValues Json?    @default("{}")
+paymentDetails    Json?
+financeDetails    Json?
+
   quotationId            Int?                      @unique
   showEmptySignatureBox  Boolean                   @default(false)
   signatureUrl           String?
@@ -321,6 +330,24 @@ model Invoice {
   @@index([branchCode])
 }
 
+
+model InvoiceDetailsSettings {
+  id                    Int      @id @default(autoincrement())
+  branchCode            String?
+  showChallan           Boolean  @default(true)
+  showDispatchedThrough Boolean  @default(false)
+  showEmailId           Boolean  @default(true)
+  showFinancedBy        Boolean  @default(true)
+  showSalesman          Boolean  @default(true)
+  showTransportName     Boolean  @default(false)
+  showWarranty          Boolean  @default(true)
+  showPO                Boolean  @default(false)
+  showEwayBill          Boolean  @default(true)
+  showVehicle           Boolean  @default(false)
+  customFields          Json     @default("[]")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
 model PartyContact {
   id         Int      @id @default(autoincrement())
   partyId    Int
@@ -515,6 +542,8 @@ model InvoiceAdditionalCharge {
   invoiceId Int
   name      String
   amount    Decimal @db.Decimal(10, 2)
+  taxLabel  String?  @default("No Tax Applicable")   
+  taxAmount Decimal? @db.Decimal(10, 2)            
   invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 }
 
