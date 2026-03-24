@@ -1,13 +1,19 @@
 import { Request, Response } from "express";
 import prisma from "../utils/prisma";
-import { InvoiceStatus, LedgerRefType, LedgerType, PaymentMode, StockRefType } from "@prisma/client";
+import {
+  InvoiceStatus,
+  LedgerRefType,
+  LedgerType,
+  PaymentMode,
+  StockRefType,
+} from "@prisma/client";
 import { getLastPartyBalanceTx } from "../services/ledger.service";
 
 /* ═══════════════════════════════════════════════════════════
    HELPERS
 ═══════════════════════════════════════════════════════════ */
 const deriveStatus = (received: number, total: number): InvoiceStatus => {
-  if (received <= 0)     return InvoiceStatus.OPEN;
+  if (received <= 0) return InvoiceStatus.OPEN;
   if (received >= total) return InvoiceStatus.PAID;
   return InvoiceStatus.PARTIAL;
 };
@@ -16,12 +22,12 @@ const deriveStatus = (received: number, total: number): InvoiceStatus => {
 const toPaymentMode = (mode?: string): PaymentMode | null => {
   if (!mode) return null;
   const map: Record<string, PaymentMode> = {
-    cash:          PaymentMode.CASH,
-    upi:           PaymentMode.UPI,
-    card:          PaymentMode.CARD,
-    netbanking:    PaymentMode.NETBANKING,
+    cash: PaymentMode.CASH,
+    upi: PaymentMode.UPI,
+    card: PaymentMode.CARD,
+    netbanking: PaymentMode.NETBANKING,
     bank_transfer: PaymentMode.BANK_TRANSFER,
-    cheque:        PaymentMode.CHEQUE,
+    cheque: PaymentMode.CHEQUE,
   };
   return map[mode.trim().toLowerCase()] ?? PaymentMode.CASH;
 };
@@ -45,12 +51,12 @@ export const createInvoice = async (req: Request, res: Response) => {
     branchCode,
     invoiceDate,
     dueDate,
-    items              = [],
-    additionalCharges  = [],
-    discountAmount     = 0,
-    roundOff           = 0,
+    items = [],
+    additionalCharges = [],
+    discountAmount = 0,
+    roundOff = 0,
     paymentMode,
-    receivedAmount     = 0,
+    receivedAmount = 0,
     notes,
     termsConditions,
     ewayBillNo,
@@ -59,8 +65,8 @@ export const createInvoice = async (req: Request, res: Response) => {
     salesman,
     emailId,
     warrantyPeriod,
-    applyTcs           = false,
-    autoRoundOff       = false,
+    applyTcs = false,
+    autoRoundOff = false,
     signatureUrl,
     showEmptySignatureBox = false,
     // ── NEW extended fields ──────────────────────────────────
@@ -74,7 +80,9 @@ export const createInvoice = async (req: Request, res: Response) => {
   } = req.body;
 
   if (!partyId || !items || items.length === 0) {
-    return res.status(400).json({ success: false, message: "partyId and items are required" });
+    return res
+      .status(400)
+      .json({ success: false, message: "partyId and items are required" });
   }
 
   try {
@@ -99,22 +107,31 @@ export const createInvoice = async (req: Request, res: Response) => {
     }
 
     // Pre-fetch stocks for product items only (not Services)
-    const productTypeItems = items.filter((i: any) => productMap.get(i.productId)?.itemType === "Product");
+    const productTypeItems = items.filter(
+      (i: any) => productMap.get(i.productId)?.itemType === "Product",
+    );
 
     const stockChecks = await Promise.all(
       productTypeItems.map((item: any) =>
         item.godownId
           ? prisma.productStock.findUnique({
-              where: { productId_godownId: { productId: item.productId, godownId: item.godownId } },
+              where: {
+                productId_godownId: {
+                  productId: item.productId,
+                  godownId: item.godownId,
+                },
+              },
             })
-          : prisma.productStock.findFirst({ where: { productId: item.productId } })
-      )
+          : prisma.productStock.findFirst({
+              where: { productId: item.productId },
+            }),
+      ),
     );
 
     // Validate stock availability
     for (let i = 0; i < productTypeItems.length; i++) {
-      const item    = productTypeItems[i];
-      const stock   = stockChecks[i];
+      const item = productTypeItems[i];
+      const stock = stockChecks[i];
       const product = productMap.get(item.productId)!;
       const available = Number(stock?.currentStock ?? stock?.openingStock ?? 0);
 
@@ -127,42 +144,64 @@ export const createInvoice = async (req: Request, res: Response) => {
     }
 
     // ── Compute line-item totals OUTSIDE tx ──────────────────────────────────
-    let subTotal  = 0;
+    let subTotal = 0;
     let taxAmount = 0;
 
     for (const item of items) {
-      const lineGross     = Number(item.price) * Number(item.quantity);
-      const discPct       = Number(item.discountPct ?? 0);
-      const discAmt       = Number(item.discount    ?? 0);
-      const totalDiscount = Math.round((lineGross * (discPct / 100) + discAmt) * 100) / 100;
-      const taxableBase   = Math.max(0, lineGross - totalDiscount);
-      const lineTax       = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
-      subTotal  += taxableBase;
+      const lineGross = Number(item.price) * Number(item.quantity);
+      const discPct = Number(item.discountPct ?? 0);
+      const discAmt = Number(item.discount ?? 0);
+      const totalDiscount =
+        Math.round((lineGross * (discPct / 100) + discAmt) * 100) / 100;
+      const product = productMap.get(item.productId);
+      const taxType = product?.taxType || "without_tax";
+
+      const rate = (item.taxRate || 0) / 100;
+
+      let taxableBase = 0;
+      let lineTax = 0;
+
+      if (taxType === "with_tax") {
+        // 🔥 GST INCLUDED
+        const baseBeforeDiscount = lineGross / (1 + rate);
+        taxableBase = Math.max(0, baseBeforeDiscount - totalDiscount);
+        lineTax = lineGross - baseBeforeDiscount;
+      } else {
+        // 🔥 GST EXTRA
+        taxableBase = Math.max(0, lineGross - totalDiscount);
+        lineTax = Math.round(taxableBase * rate * 100) / 100;
+      }
+
+      subTotal += taxableBase;
       taxAmount += lineTax;
     }
 
     // ── Additional charges total — now includes tax on each charge ────────────
     const additionalChargesTotal: number = additionalCharges.reduce(
       (sum: number, c: { name: string; amount: number; taxLabel?: string }) => {
-        const rate   = extractTaxRate(c.taxLabel ?? "");
-        const taxAmt = Math.round((c.amount ?? 0) * rate / 100 * 100) / 100;
+        const rate = extractTaxRate(c.taxLabel ?? "");
+        const taxAmt = Math.round((((c.amount ?? 0) * rate) / 100) * 100) / 100;
         return sum + (c.amount ?? 0) + taxAmt;
       },
-      0
+      0,
     );
 
-    const taxableAmount     = subTotal - Number(discountAmount);
-    const totalAmount       = taxableAmount + taxAmount + additionalChargesTotal + Number(roundOff);
+    const taxableAmount = subTotal - Number(discountAmount);
+    const totalAmount =
+      taxableAmount + taxAmount + additionalChargesTotal + Number(roundOff);
     const outstandingAmount = totalAmount - Number(receivedAmount);
 
     // ── Build invoice number OUTSIDE tx ──────────────────────────────────────
-    const usePrefix       = invoiceSettings?.enablePrefix ?? false;
-    const prefix          = usePrefix && invoiceSettings?.prefix?.trim()
-                              ? invoiceSettings.prefix.trim()
-                              : "INV-";
+    const usePrefix = invoiceSettings?.enablePrefix ?? false;
+    const prefix =
+      usePrefix && invoiceSettings?.prefix?.trim()
+        ? invoiceSettings.prefix.trim()
+        : "INV-";
     const seqFromSettings = invoiceSettings?.sequenceNumber ?? 1;
 
-    const allNos = await prisma.invoice.findMany({ select: { invoiceNo: true } });
+    const allNos = await prisma.invoice.findMany({
+      select: { invoiceNo: true },
+    });
     let maxExistingSeq = 0;
     for (const inv of allNos) {
       if (inv.invoiceNo?.startsWith(prefix)) {
@@ -170,7 +209,7 @@ export const createInvoice = async (req: Request, res: Response) => {
         if (m) maxExistingSeq = Math.max(maxExistingSeq, parseInt(m[1], 10));
       }
     }
-    let nextSeq   = Math.max(seqFromSettings, maxExistingSeq + 1);
+    let nextSeq = Math.max(seqFromSettings, maxExistingSeq + 1);
     let invoiceNo = `${prefix}${String(nextSeq).padStart(5, "0")}`;
     while (await prisma.invoice.findUnique({ where: { invoiceNo } })) {
       nextSeq++;
@@ -180,17 +219,24 @@ export const createInvoice = async (req: Request, res: Response) => {
     // Build stock-update map
     const stockUpdateMap = new Map<
       number,
-      { stockId: number; newBalance: number; productId: number; godownId: number | null }
+      {
+        stockId: number;
+        newBalance: number;
+        productId: number;
+        godownId: number | null;
+      }
     >();
     for (let i = 0; i < productTypeItems.length; i++) {
-      const item  = productTypeItems[i];
+      const item = productTypeItems[i];
       const stock = stockChecks[i]!;
-      const newBalance = Number(stock.currentStock ?? stock.openingStock ?? 0) - Number(item.quantity);
+      const newBalance =
+        Number(stock.currentStock ?? stock.openingStock ?? 0) -
+        Number(item.quantity);
       stockUpdateMap.set(item.productId, {
-        stockId:   stock.id,
+        stockId: stock.id,
         newBalance,
         productId: item.productId,
-        godownId:  stock.godownId,
+        godownId: stock.godownId,
       });
     }
 
@@ -202,25 +248,26 @@ export const createInvoice = async (req: Request, res: Response) => {
           data: {
             invoiceNo,
             partyId,
-            branchCode:  branchCode ?? null,
+            branchCode: branchCode ?? null,
             invoiceDate: invoiceDate ? new Date(invoiceDate) : new Date(),
-            dueDate:     dueDate    ? new Date(dueDate)     : null,
-            ewayBillNo:     ewayBillNo     ?? null,
-            challanNo:      challanNo      ?? null,
-            financedBy:     financedBy     ?? null,
-            salesman:       salesman       ?? null,
-            emailId:        emailId        ?? null,
+            dueDate: dueDate ? new Date(dueDate) : null,
+            ewayBillNo: ewayBillNo ?? null,
+            challanNo: challanNo ?? null,
+            financedBy: financedBy ?? null,
+            salesman: salesman ?? null,
+            emailId: emailId ?? null,
             warrantyPeriod: warrantyPeriod ?? null,
-            notes:          notes          ?? null,
+            notes: notes ?? null,
             termsConditions: termsConditions ?? null,
             // ── NEW extended fields ──────────────────────────────
-            poNumber:          poNumber          ?? null,
-            vehicleNo:         vehicleNo         ?? null,
+            poNumber: poNumber ?? null,
+            vehicleNo: vehicleNo ?? null,
             dispatchedThrough: dispatchedThrough ?? null,
-            transportName:     transportName     ?? null,
+            transportName: transportName ?? null,
             customFieldValues: customFieldValues ?? {},
-            paymentDetails:    paymentDetails    ?? null,
-            financeDetails:    (financeDetails?.enabled === true) ? financeDetails : null,
+            paymentDetails: paymentDetails ?? null,
+            financeDetails:
+              financeDetails?.enabled === true ? financeDetails : null,
             // ── Financials ───────────────────────────────────────
             subTotal,
             taxableAmount,
@@ -234,46 +281,66 @@ export const createInvoice = async (req: Request, res: Response) => {
             paymentMode: toPaymentMode(paymentMode),
             applyTcs,
             autoRoundOff,
-            signatureUrl:          signatureUrl          ?? null,
+            signatureUrl: signatureUrl ?? null,
             showEmptySignatureBox: showEmptySignatureBox ?? false,
             status: deriveStatus(Number(receivedAmount), totalAmount),
             items: {
               create: items.map((item: any) => {
-                const lineGross     = Number(item.price) * Number(item.quantity);
-                const discPct       = Number(item.discountPct ?? 0);
-                const discAmt       = Number(item.discount    ?? 0);
-                const pctDiscount   = Math.round(lineGross * (discPct / 100) * 100) / 100;
-                const totalDiscount = Math.round((pctDiscount + discAmt) * 100) / 100;
-                const taxableBase   = Math.max(0, lineGross - totalDiscount);
-                const taxAmt        = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
-                const lineTotal     = Math.round((taxableBase + taxAmt) * 100) / 100;
+                const lineGross = Number(item.price) * Number(item.quantity);
+                const discPct = Number(item.discountPct ?? 0);
+                const discAmt = Number(item.discount ?? 0);
+                const pctDiscount =
+                  Math.round(lineGross * (discPct / 100) * 100) / 100;
+                const totalDiscount =
+                  Math.round((pctDiscount + discAmt) * 100) / 100;
+                const product = productMap.get(item.productId);
+                const taxType = product?.taxType || "without_tax";
 
+                const rate = (item.taxRate || 0) / 100;
+
+                let taxableBase = 0;
+                let taxAmt = 0;
+                let lineTotal = 0;
+
+                if (taxType === "with_tax") {
+                  const baseBeforeDiscount = lineGross / (1 + rate);
+                  taxableBase = Math.max(0, baseBeforeDiscount - totalDiscount);
+                  taxAmt = lineGross - baseBeforeDiscount;
+                  lineTotal = lineGross; // total remains same
+                } else {
+                  taxableBase = Math.max(0, lineGross - totalDiscount);
+                  taxAmt = Math.round(taxableBase * rate * 100) / 100;
+                  lineTotal = Math.round((taxableBase + taxAmt) * 100) / 100;
+                }
                 return {
-                  productId:   item.productId,
-                  godownId:    item.godownId ?? null,
-                  quantity:    item.quantity,
-                  price:       item.price,
+                  productId: item.productId,
+                  godownId: item.godownId ?? null,
+                  quantity: item.quantity,
+                  price: item.price,
                   discountPct: discPct,
-                  discount:    totalDiscount,
-                  taxRate:     item.taxRate ?? 0,
-                  taxAmount:   taxAmt,
-                  total:       lineTotal,
+                  discount: totalDiscount,
+                  taxRate: item.taxRate ?? 0,
+                  taxAmount: taxAmt,
+                  total: lineTotal,
                 };
               }),
             },
             // ── Additional charges — now save taxLabel + taxAmount ──
             ...(additionalCharges.length > 0 && {
               additionalCharges: {
-                create: additionalCharges.map((c: { name: string; amount: number; taxLabel?: string }) => {
-                  const rate   = extractTaxRate(c.taxLabel ?? "");
-                  const taxAmt = Math.round((c.amount ?? 0) * rate / 100 * 100) / 100;
-                  return {
-                    name:      c.name,
-                    amount:    c.amount,
-                    taxLabel:  c.taxLabel ?? "No Tax Applicable",
-                    taxAmount: taxAmt,
-                  };
-                }),
+                create: additionalCharges.map(
+                  (c: { name: string; amount: number; taxLabel?: string }) => {
+                    const rate = extractTaxRate(c.taxLabel ?? "");
+                    const taxAmt =
+                      Math.round((((c.amount ?? 0) * rate) / 100) * 100) / 100;
+                    return {
+                      name: c.name,
+                      amount: c.amount,
+                      taxLabel: c.taxLabel ?? "No Tax Applicable",
+                      taxAmount: taxAmt,
+                    };
+                  },
+                ),
               },
             }),
           },
@@ -285,24 +352,25 @@ export const createInvoice = async (req: Request, res: Response) => {
             Array.from(stockUpdateMap.values()).map(({ stockId, newBalance }) =>
               tx.productStock.update({
                 where: { id: stockId },
-                data:  { currentStock: newBalance },
-              })
-            )
+                data: { currentStock: newBalance },
+              }),
+            ),
           );
         }
 
         // 3. Party ledger DEBIT
-        const balanceAfterDebit = (await getLastPartyBalanceTx(tx, partyId)) + totalAmount;
+        const balanceAfterDebit =
+          (await getLastPartyBalanceTx(tx, partyId)) + totalAmount;
         await tx.partyLedger.create({
           data: {
             partyId,
-            refType:   LedgerRefType.Invoice,
-            refId:     inv.id,
+            refType: LedgerRefType.Invoice,
+            refId: inv.id,
             reference: inv.invoiceNo,
-            type:      LedgerType.DEBIT,
-            debit:     totalAmount,
-            credit:    null,
-            balance:   balanceAfterDebit,
+            type: LedgerType.DEBIT,
+            debit: totalAmount,
+            credit: null,
+            balance: balanceAfterDebit,
           },
         });
 
@@ -311,13 +379,13 @@ export const createInvoice = async (req: Request, res: Response) => {
           await tx.partyLedger.create({
             data: {
               partyId,
-              refType:   LedgerRefType.Payment,
-              refId:     inv.id,
+              refType: LedgerRefType.Payment,
+              refId: inv.id,
               reference: inv.invoiceNo,
-              type:      LedgerType.CREDIT,
-              debit:     null,
-              credit:    receivedAmount,
-              balance:   balanceAfterDebit - Number(receivedAmount),
+              type: LedgerType.CREDIT,
+              debit: null,
+              credit: receivedAmount,
+              balance: balanceAfterDebit - Number(receivedAmount),
             },
           });
         }
@@ -326,32 +394,34 @@ export const createInvoice = async (req: Request, res: Response) => {
         if (invoiceSettings?.id) {
           await tx.invoiceSettings.update({
             where: { id: invoiceSettings.id },
-            data:  { sequenceNumber: nextSeq + 1 },
+            data: { sequenceNumber: nextSeq + 1 },
           });
         }
 
         return inv;
       },
-      { timeout: 15000 }
+      { timeout: 15000 },
     );
 
     // ── OUTSIDE TRANSACTION — StockLedger (non-critical) ─────────────────────
     if (stockUpdateMap.size > 0) {
       await prisma.stockLedger.createMany({
-        data: Array.from(stockUpdateMap.values()).map(({ productId, godownId, newBalance }) => {
-          const item = items.find((i: any) => i.productId === productId)!;
-          return {
-            productId,
-            godownId:    godownId ?? null,
-            date:        new Date(),
-            refType:     StockRefType.SALE,
-            refId:       created.id,
-            quantityIn:  0,
-            quantityOut: Number(item.quantity),
-            balance:     newBalance,
-            remarks:     `Sales Invoice ${invoiceNo}`,
-          };
-        }),
+        data: Array.from(stockUpdateMap.values()).map(
+          ({ productId, godownId, newBalance }) => {
+            const item = items.find((i: any) => i.productId === productId)!;
+            return {
+              productId,
+              godownId: godownId ?? null,
+              date: new Date(),
+              refType: StockRefType.SALE,
+              refId: created.id,
+              quantityIn: 0,
+              quantityOut: Number(item.quantity),
+              balance: newBalance,
+              remarks: `Sales Invoice ${invoiceNo}`,
+            };
+          },
+        ),
       });
     }
 
@@ -377,8 +447,11 @@ export const getInvoices = async (req: Request, res: Response) => {
     const where: any = {};
     if (partyId) where.partyId = Number(partyId);
     if (status) {
-      const statuses = String(status).split(",").map((s) => s.trim()).filter(Boolean);
-      where.status   = statuses.length === 1 ? statuses[0] : { in: statuses };
+      const statuses = String(status)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      where.status = statuses.length === 1 ? statuses[0] : { in: statuses };
     }
 
     const take = limit ? Math.min(500, Number(limit)) : undefined;
@@ -387,11 +460,11 @@ export const getInvoices = async (req: Request, res: Response) => {
     const invoices = await (prisma.invoice.findMany as any)({
       where,
       include: {
-        party:             true,
-        items:             { include: { product: true } },
+        party: true,
+        items: { include: { product: true } },
         additionalCharges: true,
-        allocations:       true,
-        salesReturns:      true,
+        allocations: true,
+        salesReturns: true,
       },
       orderBy: { createdAt: "desc" },
       ...(take ? { take } : {}),
@@ -401,7 +474,9 @@ export const getInvoices = async (req: Request, res: Response) => {
     return res.json({ success: true, data: invoices });
   } catch (error) {
     console.error("❌ Fetch Invoices Error:", error);
-    return res.status(500).json({ success: false, message: "Failed to fetch invoices" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch invoices" });
   }
 };
 
@@ -411,25 +486,33 @@ export const getInvoices = async (req: Request, res: Response) => {
 ═══════════════════════════════════════════════════════════ */
 export const getInvoiceById = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
-  if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
+  if (isNaN(id))
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid invoice ID" });
 
   try {
     const invoice = await (prisma.invoice.findUnique as any)({
       where: { id },
       include: {
-        party:             true,
-        items:             { include: { product: true } },
+        party: true,
+        items: { include: { product: true } },
         additionalCharges: true,
-        allocations:       true,
-        salesReturns:      true,
+        allocations: true,
+        salesReturns: true,
       },
     });
 
-    if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found" });
+    if (!invoice)
+      return res
+        .status(404)
+        .json({ success: false, message: "Invoice not found" });
     return res.json({ success: true, data: invoice });
   } catch (error) {
     console.error("❌ Fetch Invoice Error:", error);
-    return res.status(500).json({ success: false, message: "Failed to fetch invoice" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch invoice" });
   }
 };
 
@@ -439,13 +522,23 @@ export const getInvoiceById = async (req: Request, res: Response) => {
 ═══════════════════════════════════════════════════════════ */
 export const updateInvoice = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
-  if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
+  if (isNaN(id))
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid invoice ID" });
 
   const {
-    dueDate, ewayBillNo, challanNo, financedBy,
-    salesman, emailId, warrantyPeriod,
-    notes, termsConditions,
-    signatureUrl, showEmptySignatureBox,
+    dueDate,
+    ewayBillNo,
+    challanNo,
+    financedBy,
+    salesman,
+    emailId,
+    warrantyPeriod,
+    notes,
+    termsConditions,
+    signatureUrl,
+    showEmptySignatureBox,
     // ── NEW extended fields ──────────────────────────────────
     poNumber,
     vehicleNo,
@@ -459,38 +552,58 @@ export const updateInvoice = async (req: Request, res: Response) => {
   try {
     const existing = await prisma.invoice.findUnique({ where: { id } });
     if (!existing)
-      return res.status(404).json({ success: false, message: "Invoice not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Invoice not found" });
     if (existing.status === InvoiceStatus.CANCELLED)
-      return res.status(400).json({ success: false, message: "Cannot update a cancelled invoice" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Cannot update a cancelled invoice" });
 
     const updated = await (prisma.invoice.update as any)({
       where: { id },
       data: {
-        dueDate:               dueDate ? new Date(dueDate) : undefined,
-        ewayBillNo:            ewayBillNo            ?? undefined,
-        challanNo:             challanNo             ?? undefined,
-        financedBy:            financedBy            ?? undefined,
-        salesman:              salesman              ?? undefined,
-        emailId:               emailId               ?? undefined,
-        warrantyPeriod:        warrantyPeriod        ?? undefined,
-        notes:                 notes                 ?? undefined,
-        termsConditions:       termsConditions       ?? undefined,
-        signatureUrl:          signatureUrl          !== undefined ? signatureUrl          : undefined,
-        showEmptySignatureBox: showEmptySignatureBox !== undefined ? showEmptySignatureBox : undefined,
+        dueDate: dueDate ? new Date(dueDate) : undefined,
+        ewayBillNo: ewayBillNo ?? undefined,
+        challanNo: challanNo ?? undefined,
+        financedBy: financedBy ?? undefined,
+        salesman: salesman ?? undefined,
+        emailId: emailId ?? undefined,
+        warrantyPeriod: warrantyPeriod ?? undefined,
+        notes: notes ?? undefined,
+        termsConditions: termsConditions ?? undefined,
+        signatureUrl: signatureUrl !== undefined ? signatureUrl : undefined,
+        showEmptySignatureBox:
+          showEmptySignatureBox !== undefined
+            ? showEmptySignatureBox
+            : undefined,
         // ── NEW extended fields ──────────────────────────────
-        poNumber:          poNumber          !== undefined ? (poNumber          || null) : undefined,
-        vehicleNo:         vehicleNo         !== undefined ? (vehicleNo         || null) : undefined,
-        dispatchedThrough: dispatchedThrough !== undefined ? (dispatchedThrough || null) : undefined,
-        transportName:     transportName     !== undefined ? (transportName     || null) : undefined,
-        customFieldValues: customFieldValues !== undefined ? customFieldValues             : undefined,
-        paymentDetails:    paymentDetails    !== undefined ? (paymentDetails    || null) : undefined,
-        financeDetails:    financeDetails    !== undefined
-                             ? (financeDetails?.enabled === true ? financeDetails : null)
-                             : undefined,
+        poNumber: poNumber !== undefined ? poNumber || null : undefined,
+        vehicleNo: vehicleNo !== undefined ? vehicleNo || null : undefined,
+        dispatchedThrough:
+          dispatchedThrough !== undefined
+            ? dispatchedThrough || null
+            : undefined,
+        transportName:
+          transportName !== undefined ? transportName || null : undefined,
+        customFieldValues:
+          customFieldValues !== undefined ? customFieldValues : undefined,
+        paymentDetails:
+          paymentDetails !== undefined ? paymentDetails || null : undefined,
+        financeDetails:
+          financeDetails !== undefined
+            ? financeDetails?.enabled === true
+              ? financeDetails
+              : null
+            : undefined,
       },
     });
 
-    return res.json({ success: true, message: "Invoice updated", data: updated });
+    return res.json({
+      success: true,
+      message: "Invoice updated",
+      data: updated,
+    });
   } catch (error: any) {
     console.error("❌ Update Invoice Error:", error);
     return res.status(500).json({ success: false, message: error.message });
@@ -503,32 +616,36 @@ export const updateInvoice = async (req: Request, res: Response) => {
 ═══════════════════════════════════════════════════════════ */
 export const cancelInvoice = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
-  if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
+  if (isNaN(id))
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid invoice ID" });
 
   try {
     const result = await prisma.$transaction(
       async (tx) => {
         const invoice = await tx.invoice.findUnique({
-          where:   { id },
+          where: { id },
           include: { items: true },
         });
 
-        if (!invoice)
-          throw new Error("Invoice not found");
+        if (!invoice) throw new Error("Invoice not found");
         if (invoice.status === InvoiceStatus.CANCELLED)
           throw new Error("Invoice is already cancelled");
 
         // Restore stock in PARALLEL
         await Promise.all(
           invoice.items.map(async (item) => {
-            const stock = await tx.productStock.findFirst({ where: { productId: item.productId } });
+            const stock = await tx.productStock.findFirst({
+              where: { productId: item.productId },
+            });
             if (stock) {
               await tx.productStock.update({
                 where: { id: stock.id },
-                data:  { currentStock: { increment: item.quantity } },
+                data: { currentStock: { increment: item.quantity } },
               });
             }
-          })
+          }),
         );
 
         // Reversal ledger entry
@@ -538,26 +655,30 @@ export const cancelInvoice = async (req: Request, res: Response) => {
 
         await tx.partyLedger.create({
           data: {
-            partyId:   invoice.partyId,
-            refType:   LedgerRefType.Return,
-            refId:     invoice.id,
+            partyId: invoice.partyId,
+            refType: LedgerRefType.Return,
+            refId: invoice.id,
             reference: invoice.invoiceNo,
-            type:      LedgerType.CREDIT,
-            debit:     null,
-            credit:    invoice.totalAmount,
-            balance:   newBalance,
+            type: LedgerType.CREDIT,
+            debit: null,
+            credit: invoice.totalAmount,
+            balance: newBalance,
           },
         });
 
         return tx.invoice.update({
           where: { id },
-          data:  { status: InvoiceStatus.CANCELLED },
+          data: { status: InvoiceStatus.CANCELLED },
         });
       },
-      { timeout: 15000 }
+      { timeout: 15000 },
     );
 
-    return res.json({ success: true, message: "Invoice cancelled", data: result });
+    return res.json({
+      success: true,
+      message: "Invoice cancelled",
+      data: result,
+    });
   } catch (error: any) {
     console.error("❌ Cancel Invoice Error:", error);
     return res.status(400).json({ success: false, message: error.message });
@@ -570,19 +691,23 @@ export const cancelInvoice = async (req: Request, res: Response) => {
 ═══════════════════════════════════════════════════════════ */
 export const recordInvoicePayment = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
-  if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
+  if (isNaN(id))
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid invoice ID" });
 
   const { amount, paymentMode } = req.body;
   if (!amount || amount <= 0)
-    return res.status(400).json({ success: false, message: "Invalid payment amount" });
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid payment amount" });
 
   try {
     const result = await prisma.$transaction(
       async (tx) => {
         const invoice: any = await tx.invoice.findUnique({ where: { id } });
 
-        if (!invoice)
-          throw new Error("Invoice not found");
+        if (!invoice) throw new Error("Invoice not found");
         if (invoice.status === InvoiceStatus.CANCELLED)
           throw new Error("Cannot pay a cancelled invoice");
         if (invoice.status === InvoiceStatus.PAID)
@@ -590,42 +715,55 @@ export const recordInvoicePayment = async (req: Request, res: Response) => {
 
         const currentOutstanding = Number(invoice.outstandingAmount ?? 0);
         if (amount > currentOutstanding)
-          throw new Error(`Payment (${amount}) exceeds outstanding amount (${currentOutstanding})`);
+          throw new Error(
+            `Payment (${amount}) exceeds outstanding amount (${currentOutstanding})`,
+          );
 
-        const newReceived    = Number(invoice.receivedAmount ?? 0) + amount;
+        const newReceived = Number(invoice.receivedAmount ?? 0) + amount;
         const newOutstanding = currentOutstanding - amount;
-        const newStatus      = deriveStatus(newReceived, Number(invoice.totalAmount));
+        const newStatus = deriveStatus(
+          newReceived,
+          Number(invoice.totalAmount),
+        );
 
         const updated = await (tx.invoice.update as any)({
           where: { id },
           data: {
-            receivedAmount:    newReceived,
+            receivedAmount: newReceived,
             outstandingAmount: newOutstanding,
-            paymentMode:       toPaymentMode(paymentMode) ?? toPaymentMode(invoice.paymentMode) ?? null,
-            status:            newStatus,
+            paymentMode:
+              toPaymentMode(paymentMode) ??
+              toPaymentMode(invoice.paymentMode) ??
+              null,
+            status: newStatus,
           },
         });
 
-        const newBalance = (await getLastPartyBalanceTx(tx, invoice.partyId)) - amount;
+        const newBalance =
+          (await getLastPartyBalanceTx(tx, invoice.partyId)) - amount;
         await tx.partyLedger.create({
           data: {
-            partyId:   invoice.partyId,
-            refType:   LedgerRefType.Payment,
-            refId:     invoice.id,
+            partyId: invoice.partyId,
+            refType: LedgerRefType.Payment,
+            refId: invoice.id,
             reference: invoice.invoiceNo,
-            type:      LedgerType.CREDIT,
-            debit:     null,
-            credit:    amount,
-            balance:   newBalance,
+            type: LedgerType.CREDIT,
+            debit: null,
+            credit: amount,
+            balance: newBalance,
           },
         });
 
         return updated;
       },
-      { timeout: 15000 }
+      { timeout: 15000 },
     );
 
-    return res.json({ success: true, message: "Payment recorded", data: result });
+    return res.json({
+      success: true,
+      message: "Payment recorded",
+      data: result,
+    });
   } catch (error: any) {
     console.error("❌ Record Payment Error:", error);
     return res.status(400).json({ success: false, message: error.message });
@@ -641,38 +779,42 @@ export const getInvoiceSummary = async (_req: Request, res: Response) => {
     const [totalAgg, statusCounts, extraAgg, cancelledAgg] = await Promise.all([
       prisma.invoice.aggregate({
         where: { status: { not: InvoiceStatus.CANCELLED } },
-        _sum:  { totalAmount: true },
+        _sum: { totalAmount: true },
       }),
       prisma.invoice.groupBy({ by: ["status"], _count: { id: true } }),
       (prisma.invoice.aggregate as any)({
         where: { status: { not: InvoiceStatus.CANCELLED } },
-        _sum:  { receivedAmount: true, outstandingAmount: true },
+        _sum: { receivedAmount: true, outstandingAmount: true },
       }),
       prisma.invoice.aggregate({
         where: { status: InvoiceStatus.CANCELLED },
-        _sum:  { totalAmount: true },
+        _sum: { totalAmount: true },
       }),
     ]);
 
     const statusMap: Record<string, number> = {};
-    statusCounts.forEach((c) => { statusMap[c.status] = c._count.id; });
+    statusCounts.forEach((c) => {
+      statusMap[c.status] = c._count.id;
+    });
 
     return res.json({
       success: true,
       data: {
-        totalInvoiced:    totalAgg._sum?.totalAmount          ?? 0,
-        totalReceived:    extraAgg?._sum?.receivedAmount      ?? 0,
-        totalOutstanding: extraAgg?._sum?.outstandingAmount   ?? 0,
-        totalCancelled:   cancelledAgg._sum?.totalAmount      ?? 0,
-        openCount:        statusMap[InvoiceStatus.OPEN]       ?? 0,
-        partialCount:     statusMap[InvoiceStatus.PARTIAL]    ?? 0,
-        paidCount:        statusMap[InvoiceStatus.PAID]       ?? 0,
-        cancelledCount:   statusMap[InvoiceStatus.CANCELLED]  ?? 0,
+        totalInvoiced: totalAgg._sum?.totalAmount ?? 0,
+        totalReceived: extraAgg?._sum?.receivedAmount ?? 0,
+        totalOutstanding: extraAgg?._sum?.outstandingAmount ?? 0,
+        totalCancelled: cancelledAgg._sum?.totalAmount ?? 0,
+        openCount: statusMap[InvoiceStatus.OPEN] ?? 0,
+        partialCount: statusMap[InvoiceStatus.PARTIAL] ?? 0,
+        paidCount: statusMap[InvoiceStatus.PAID] ?? 0,
+        cancelledCount: statusMap[InvoiceStatus.CANCELLED] ?? 0,
       },
     });
   } catch (error) {
     console.error("❌ Invoice Summary Error:", error);
-    return res.status(500).json({ success: false, message: "Failed to fetch invoice summary" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch invoice summary" });
   }
 };
 
@@ -683,11 +825,13 @@ export const getInvoiceSummary = async (_req: Request, res: Response) => {
 export const getPartyItemWiseReport = async (req: Request, res: Response) => {
   const partyId = Number(req.params.id);
   if (isNaN(partyId))
-    return res.status(400).json({ success: false, message: "Invalid party ID" });
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid party ID" });
 
   try {
     const invoices = await prisma.invoice.findMany({
-      where:   { partyId },
+      where: { partyId },
       include: { items: { include: { product: true } } },
       orderBy: { createdAt: "desc" },
     });
@@ -696,20 +840,22 @@ export const getPartyItemWiseReport = async (req: Request, res: Response) => {
       invoice.items.map((item) => ({
         partyId,
         invoiceNo: invoice.invoiceNo,
-        itemName:  item.product.name,
-        itemCode:  item.product.itemCode ?? null,
-        quantity:  item.quantity,
-        price:     Number(item.price),
-        amount:    Number(item.total),
-        type:      "Sale",
-        date:      invoice.createdAt,
-      }))
+        itemName: item.product.name,
+        itemCode: item.product.itemCode ?? null,
+        quantity: item.quantity,
+        price: Number(item.price),
+        amount: Number(item.total),
+        type: "Sale",
+        date: invoice.createdAt,
+      })),
     );
 
     return res.json({ success: true, data });
   } catch (error) {
     console.error("❌ Item-wise Report Error:", error);
-    return res.status(500).json({ success: false, message: "Failed to fetch item-wise report" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch item-wise report" });
   }
 };
 
@@ -719,7 +865,10 @@ export const getPartyItemWiseReport = async (req: Request, res: Response) => {
 ═══════════════════════════════════════════════════════════ */
 export const deleteInvoice = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
-  if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid invoice ID" });
+  if (isNaN(id))
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid invoice ID" });
 
   try {
     await prisma.$transaction(
@@ -727,19 +876,27 @@ export const deleteInvoice = async (req: Request, res: Response) => {
         const invoice = await tx.invoice.findUnique({ where: { id } });
         if (!invoice) throw new Error("Invoice not found");
 
-        await tx.partyLedger.deleteMany({ where: { refType: "Invoice", refId: id } });
-        await (tx as any).paymentAllocation?.deleteMany?.({ where: { invoiceId: id } }).catch(() => {});
+        await tx.partyLedger.deleteMany({
+          where: { refType: "Invoice", refId: id },
+        });
+        await (tx as any).paymentAllocation
+          ?.deleteMany?.({ where: { invoiceId: id } })
+          .catch(() => {});
         await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
         await tx.invoice.delete({ where: { id } });
       },
-      { timeout: 15000 }
+      { timeout: 15000 },
     );
 
     return res.json({ success: true, message: "Invoice deleted successfully" });
   } catch (error: any) {
     console.error("❌ Delete Invoice Error:", error);
     if (error.message === "Invoice not found")
-      return res.status(404).json({ success: false, message: "Invoice not found" });
-    return res.status(500).json({ success: false, message: "Failed to delete invoice" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Invoice not found" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to delete invoice" });
   }
 };
