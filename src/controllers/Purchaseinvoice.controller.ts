@@ -464,6 +464,7 @@ export const updatePurchaseInvoice = async (req: Request, res: Response) => {
       applyTcs = false,
       applyTds = false,
       autoRoundOff = false,
+      signatureUrl,
     } = req.body;
 
     // godownId is optional — resolveGodownId() will auto-fetch from product if missing
@@ -536,6 +537,7 @@ export const updatePurchaseInvoice = async (req: Request, res: Response) => {
           amountPaid: paid,
           balanceAmount,
           status: deriveStatus(paid, totalAmount),
+          signatureUrl: signatureUrl ?? null,
         },
       });
 
