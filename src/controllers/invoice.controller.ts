@@ -330,7 +330,18 @@ export const createInvoice = async (req: Request, res: Response) => {
           });
         }
 
+        // ✅ UPDATE PROFORMA STATUS AFTER INVOICE SAVE
+if (req.body.proformaId) {
+  await tx.proformaInvoice.update({
+    where: { id: Number(req.body.proformaId) },
+    data: {
+      status: "CONVERTED",
+      convertedToInvoiceId: inv.id
+    }
+  });
+}
         return inv;
+
       },
       { timeout: 15000 }
     );
