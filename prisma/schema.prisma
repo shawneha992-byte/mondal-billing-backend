@@ -119,7 +119,11 @@ model Product {
   trackBatchExpiry     Boolean               @default(false)
   wholesaleEnabled     Boolean               @default(false)
   wholesalePrice       Decimal?              @db.Decimal(10, 2)
-  taxType              String                @default("without_tax")
+taxType              String                @default("without_tax")
+baseSalesPrice       Decimal?              @db.Decimal(10, 2)   // always the pre-tax price
+salesPriceInclTax    Boolean               @default(false)      // was the entered price inclusive?
+basePurchasePrice    Decimal?              @db.Decimal(10, 2)   // always the pre-tax purchase price
+purchasePriceInclTax Boolean               @default(false)      // was the entered purchase price inclusive?
   deliveryChallanItems DeliveryChallanItem[]
   proformaInvoiceItems ProformaInvoiceItem[]
 
