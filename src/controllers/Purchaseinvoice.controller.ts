@@ -802,3 +802,26 @@ export const getPendingInvoicesByParty = async (
     res.status(500).json({ message: "Error fetching pending invoices" });
   }
 };
+/* ═══════════════════════════════════════════════════════
+   UPDATE SIGNATURE  —  PATCH /api/purchase-invoices/:id/signature
+═══════════════════════════════════════════════════════ */
+export const updatePurchaseInvoiceSignature = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { signatureUrl } = req.body;
+
+    if (!signatureUrl) {
+      return res.status(400).json({ success: false, message: "signatureUrl is required" });
+    }
+
+    const updated = await prisma.purchaseInvoice.update({
+      where: { id },
+      data: { signatureUrl },
+    });
+
+    return res.json({ success: true, data: updated });
+  } catch (error: any) {
+    console.error("updatePurchaseInvoiceSignature:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
