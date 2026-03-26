@@ -29,19 +29,21 @@ model Branch {
 }
 
 model User {
-  id            Int           @id @default(autoincrement())
-  name          String
-  email         String?       @unique
-  mobile        String?       @unique
-  password_hash String
-  role          Role
-  branch_code   String?
-  isActive      Boolean       @default(true)
-  status        Status        @default(active)
-  created_at    DateTime      @default(now())
-  createdAt     DateTime      @default(now())
-  branch        Branch?       @relation(fields: [branch_code], references: [branch_code])
-  sessions      UserSession[]
+  id               Int           @id @default(autoincrement())
+  name             String
+  email            String?       @unique
+  mobile           String?       @unique
+  password_hash    String
+  role             Role
+  branch_code      String?
+  isActive         Boolean       @default(true)
+  status           Status        @default(active)
+  created_at       DateTime      @default(now())
+  createdAt        DateTime      @default(now())
+  reset_otp        String?
+  reset_otp_expiry DateTime?
+  branch           Branch?       @relation(fields: [branch_code], references: [branch_code])
+  sessions         UserSession[]
 }
 
 model UserSession {
