@@ -134,34 +134,76 @@ export const createInvoice = async (req: Request, res: Response) => {
       }
     }
 
-    // ── Compute line-item totals OUTSIDE tx ──────────────────────────────────
-    let subTotal  = 0;
-    let taxAmount = 0;
+    // ════════════════════════════════════════════════════════════════
+    // COMPUTE TOTALS — same model as frontend (SISummary / CreateSalesInvoice)
+    //
+    // NEW MODEL: Invoice-level discount reduces the GST-inclusive total,
+    // then reverse-calculation splits the reduced total into taxable + tax.
+    //
+    // Step 1: Per-line taxable and tax (discount per line applied first)
+    // Step 2: preTotalAmount = itemsTaxableSum + itemsTaxSum + chargesTotal
+    // Step 3: afterDiscTotal = preTotalAmount - discountAmount (invoice-level disc)
+    // Step 4: Reverse-calculate:
+    //   scaleFactor = afterDiscTotal / preTotalAmount
+    //   subTotal    = itemsTaxableSum × scaleFactor  (stored as taxable)
+    //   taxAmount   = itemsTaxSum     × scaleFactor  (stored as tax)
+    // ════════════════════════════════════════════════════════════════
+
+    // ── Per-line taxable and tax (before invoice-level discount) ──────────────
+    let itemsTaxableSum = 0;
+    let itemsTaxSum     = 0;
 
     for (const item of items) {
       const lineGross     = Number(item.price) * Number(item.quantity);
       const discPct       = Number(item.discountPct ?? 0);
       const discAmt       = Number(item.discount    ?? 0);
-      const totalDiscount = Math.round((lineGross * (discPct / 100) + discAmt) * 100) / 100;
-      const taxableBase   = Math.max(0, lineGross - totalDiscount);
+      // discPct takes priority: when % is set, flat amount is ignored
+      const lineDiscAmt   = discPct > 0
+        ? Math.round(lineGross * (discPct / 100) * 100) / 100
+        : Math.round(discAmt * 100) / 100;
+      const taxableBase   = Math.max(0, lineGross - lineDiscAmt);
       const lineTax       = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
-      subTotal  += taxableBase;
-      taxAmount += lineTax;
+      itemsTaxableSum    += taxableBase;
+      itemsTaxSum        += lineTax;
     }
 
-    // ── Additional charges total — now includes tax on each charge ────────────
-    const additionalChargesTotal: number = additionalCharges.reduce(
-      (sum: number, c: { name: string; amount: number; taxLabel?: string }) => {
-        const rate   = extractTaxRate(c.taxLabel ?? "");
-        const taxAmt = Math.round((c.amount ?? 0) * rate / 100 * 100) / 100;
-        return sum + (c.amount ?? 0) + taxAmt;
-      },
-      0
-    );
+    // ── Additional charges total ──────────────────────────────────────────────
+    let chargesBase = 0;
+    let chargesTax  = 0;
+    for (const c of additionalCharges as { name: string; amount: number; taxLabel?: string }[]) {
+      const rate   = extractTaxRate(c.taxLabel ?? "");
+      const taxAmt = Math.round((c.amount ?? 0) * rate / 100 * 100) / 100;
+      chargesBase += (c.amount ?? 0);
+      chargesTax  += taxAmt;
+    }
+    const additionalChargesTotal = Math.round((chargesBase + chargesTax) * 100) / 100;
 
-    const taxableAmount     = subTotal - Number(discountAmount);
-    const totalAmount       = taxableAmount + taxAmount + additionalChargesTotal + Number(roundOff);
-    const outstandingAmount = totalAmount - Number(receivedAmount);
+    // ── GST-inclusive total before invoice-level discount ─────────────────────
+    const preTotalAmount = Math.round(
+      (itemsTaxableSum + itemsTaxSum + additionalChargesTotal) * 100
+    ) / 100;
+
+    // ── Invoice-level discount (applied on GST-inclusive total) ───────────────
+    // discountAmount is passed from the frontend already computed (invoiceDiscAmt)
+    const invDiscAmt    = Math.min(Number(discountAmount) || 0, preTotalAmount);
+    const afterDiscTotal = Math.max(0, Math.round((preTotalAmount - invDiscAmt) * 100) / 100);
+
+    // ── Reverse-calculate: split afterDiscTotal into taxable + tax ─────────────
+    // scaleFactor = afterDiscTotal / preTotalAmount
+    // subTotal    = itemsTaxableSum × scaleFactor   (= stored taxable amount)
+    // taxAmount   = itemsTaxSum     × scaleFactor   (= stored tax amount)
+    let subTotal  = itemsTaxableSum;
+    let taxAmount = itemsTaxSum;
+    if (preTotalAmount > 0 && invDiscAmt > 0) {
+      const scaleFactor = afterDiscTotal / preTotalAmount;
+      subTotal  = Math.round(itemsTaxableSum * scaleFactor * 100) / 100;
+      taxAmount = Math.round(itemsTaxSum     * scaleFactor * 100) / 100;
+    }
+
+    // ── Final totals ──────────────────────────────────────────────────────────
+    const taxableAmount     = subTotal;   // already reverse-calculated
+    const totalAmount       = Math.round((afterDiscTotal + Number(roundOff)) * 100) / 100;
+    const outstandingAmount = Math.max(0, Math.round((totalAmount - Number(receivedAmount)) * 100) / 100);
 
     // ── Build invoice number OUTSIDE tx ──────────────────────────────────────
     const usePrefix       = invoiceSettings?.enablePrefix ?? false;
