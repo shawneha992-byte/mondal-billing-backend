@@ -152,22 +152,22 @@ export const createInvoice = async (req: Request, res: Response) => {
     // ── Per-line taxable and tax (before invoice-level discount) ──────────────
     let itemsTaxableSum = 0;
     let itemsTaxSum     = 0;
-
+ 
     for (const item of items) {
-      const lineGross     = Number(item.price) * Number(item.quantity);
-      const discPct       = Number(item.discountPct ?? 0);
-      const discAmt       = Number(item.discount    ?? 0);
+      const lineGross   = Number(item.price) * Number(item.quantity);
+      const discPct     = Number(item.discountPct ?? 0);
+      const discAmt     = Number(item.discount    ?? 0);
       // discPct takes priority: when % is set, flat amount is ignored
-      const lineDiscAmt   = discPct > 0
+      const lineDiscAmt = discPct > 0
         ? Math.round(lineGross * (discPct / 100) * 100) / 100
         : Math.round(discAmt * 100) / 100;
-      const taxableBase   = Math.max(0, lineGross - lineDiscAmt);
-      const lineTax       = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
-      itemsTaxableSum    += taxableBase;
-      itemsTaxSum        += lineTax;
+      const taxableBase  = Math.max(0, lineGross - lineDiscAmt);
+      const lineTax      = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
+      itemsTaxableSum   += taxableBase;
+      itemsTaxSum       += lineTax;
     }
-
-    // ── Additional charges total ──────────────────────────────────────────────
+ 
+    // ── Additional charges total ──────────────────────────────────────────
     let chargesBase = 0;
     let chargesTax  = 0;
     for (const c of additionalCharges as { name: string; amount: number; taxLabel?: string }[]) {
@@ -177,31 +177,25 @@ export const createInvoice = async (req: Request, res: Response) => {
       chargesTax  += taxAmt;
     }
     const additionalChargesTotal = Math.round((chargesBase + chargesTax) * 100) / 100;
-
-    // ── GST-inclusive total before invoice-level discount ─────────────────────
+ 
+    // ── GST-inclusive total before invoice-level discount ─────────────────
     const preTotalAmount = Math.round(
       (itemsTaxableSum + itemsTaxSum + additionalChargesTotal) * 100
     ) / 100;
-
-    // ── Invoice-level discount (applied on GST-inclusive total) ───────────────
-    // discountAmount is passed from the frontend already computed (invoiceDiscAmt)
-    const invDiscAmt    = Math.min(Number(discountAmount) || 0, preTotalAmount);
+ 
+    // ── Invoice-level discount (applied on GST-inclusive total) ───────────
+    // discountAmount passed from frontend is already computed (invoiceDiscAmt).
+    const invDiscAmt     = Math.min(Number(discountAmount) || 0, preTotalAmount);
     const afterDiscTotal = Math.max(0, Math.round((preTotalAmount - invDiscAmt) * 100) / 100);
-
-    // ── Reverse-calculate: split afterDiscTotal into taxable + tax ─────────────
-    // scaleFactor = afterDiscTotal / preTotalAmount
-    // subTotal    = itemsTaxableSum × scaleFactor   (= stored taxable amount)
-    // taxAmount   = itemsTaxSum     × scaleFactor   (= stored tax amount)
-    let subTotal  = itemsTaxableSum;
-    let taxAmount = itemsTaxSum;
-    if (preTotalAmount > 0 && invDiscAmt > 0) {
-      const scaleFactor = afterDiscTotal / preTotalAmount;
-      subTotal  = Math.round(itemsTaxableSum * scaleFactor * 100) / 100;
-      taxAmount = Math.round(itemsTaxSum     * scaleFactor * 100) / 100;
-    }
-
-    // ── Final totals ──────────────────────────────────────────────────────────
-    const taxableAmount     = subTotal;   // already reverse-calculated
+ 
+    // ── subTotal and taxAmount: NOT reverse-calculated ────────────────────
+    // The invoice-level discount only reduces totalAmount.
+    // Taxable amount and tax stored in the DB reflect the true per-line values.
+    const subTotal      = Math.round(itemsTaxableSum * 100) / 100;
+    const taxAmount     = Math.round(itemsTaxSum     * 100) / 100;
+    const taxableAmount = subTotal; // alias used in the Invoice.create call below
+ 
+    // ── Final totals ──────────────────────────────────────────────────────
     const totalAmount       = Math.round((afterDiscTotal + Number(roundOff)) * 100) / 100;
     const outstandingAmount = Math.max(0, Math.round((totalAmount - Number(receivedAmount)) * 100) / 100);
 
