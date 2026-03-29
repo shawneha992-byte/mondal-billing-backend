@@ -285,12 +285,11 @@ export const createInvoice = async (req: Request, res: Response) => {
           },
         });
 
-        // ── 1b. Insert items — use createMany so we can skip relation
-        //        validation for free-text items (no productId).
-        //        We must use $executeRaw because Prisma's typed createMany
-        //        still enforces the NOT NULL productId from the OLD generated
-        //        client until `prisma generate` is re-run after migration.
-        //        This raw insert works with BOTH the old and new schema.
+        // ── 1b. Insert items one by one using typed Prisma create.
+        //        We cast to (tx as any) to bypass the stale generated client
+        //        type that still marks productId as NOT NULL — after running
+        //        `prisma migrate` + `prisma generate` you can remove the cast.
+        //        This avoids ALL raw-SQL binary-protocol issues (22P03).
         for (const item of items) {
           const lineGross     = Number(item.price) * Number(item.quantity);
           const discPct       = Number(item.discountPct ?? 0);
@@ -300,20 +299,23 @@ export const createInvoice = async (req: Request, res: Response) => {
           const taxableBase   = Math.max(0, lineGross - totalDiscount);
           const taxAmt        = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
           const lineTotal     = Math.round((taxableBase + taxAmt) * 100) / 100;
-          const resolvedProductId = item.productId != null ? Number(item.productId) : null;
-          const resolvedProductName = item.productName ?? item.name ?? null;
 
-          await tx.$executeRaw`
-            INSERT INTO "InvoiceItem"
-              ("invoiceId", "productId", "productName", "godownId",
-               "quantity", "price", "discountPct", "discount",
-               "taxRate", "taxAmount", "total")
-            VALUES
-              (${inv.id}, ${resolvedProductId}, ${resolvedProductName}, ${item.godownId ?? null},
-               ${Number(item.quantity)}, ${Number(item.price)}, ${discPct}, ${totalDiscount},
-               ${Number(item.taxRate ?? 0)}, ${taxAmt}, ${lineTotal})
-          `;
-        }
+          await (tx.invoiceItem.create as any)({
+            data: {
+              invoiceId:   inv.id,
+              productId:   item.productId != null ? Number(item.productId) : null,
+              productName: item.productName ?? item.name ?? null,
+              godownId:    item.godownId   != null ? Number(item.godownId)  : null,
+              quantity:    Number(item.quantity),
+              price:       Number(item.price),
+              discountPct: discPct,
+              discount:    totalDiscount,
+              taxRate:     Number(item.taxRate ?? 0),
+              taxAmount:   taxAmt,
+              total:       lineTotal,
+            },
+          });
+        } // ← closes for (const item of items)
 
         // ── 1c. Additional charges
         if (additionalCharges.length > 0) {

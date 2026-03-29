@@ -160,6 +160,7 @@ model Godown {
   PurchaseInvoiceItem  PurchaseInvoiceItem[]
   QuotationItem        QuotationItem[]
   stockLedger          StockLedger[]
+  salesReturnItems   SalesReturnItem[]
 }
 
 model ProductStock {
@@ -317,6 +318,7 @@ model Invoice {
   showEmptySignatureBox  Boolean                   @default(false)
   signatureUrl           String?
   customFieldValues      Json?                     @default("{}")
+  snapshotMetaFields  Json?
   dispatchedThrough      String?
   financeDetails         Json?
   paymentDetails         Json?
@@ -388,24 +390,34 @@ model PartyAddress {
 }
 
 model SalesReturn {
-  id          Int               @id @default(autoincrement())
-  invoiceId   Int
-  partyId     Int
-  totalAmount Float
-  createdAt   DateTime          @default(now())
-  invoice     Invoice           @relation(fields: [invoiceId], references: [id])
-  party       Party             @relation(fields: [partyId], references: [id])
-  items       SalesReturnItem[]
+  id           Int               @id @default(autoincrement())
+  invoiceId    Int             
+  partyId      Int
+  totalAmount  Float
+  reason       String?
+  notes        String?
+  returnStatus String            @default("Refunded")
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  invoice      Invoice           @relation(fields: [invoiceId], references: [id])
+  party        Party             @relation(fields: [partyId], references: [id])
+  items        SalesReturnItem[]
+
+  @@index([partyId])
 }
 
 model SalesReturnItem {
-  id            Int         @id @default(autoincrement())
+  id            Int          @id @default(autoincrement())
   salesReturnId Int
   productId     Int
   quantity      Int
   price         Float
-  product       Product     @relation(fields: [productId], references: [id])
-  salesReturn   SalesReturn @relation(fields: [salesReturnId], references: [id])
+  godownId      Int?         // ← which godown stock is returned to
+
+  product       Product      @relation(fields: [productId], references: [id])
+  salesReturn   SalesReturn  @relation(fields: [salesReturnId], references: [id], onDelete: Cascade)
+  godown        Godown?      @relation(fields: [godownId], references: [godown_id])
 }
 
 model Quotation {
