@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import prisma from "../utils/prisma";
-import { ProformaStatus, InvoiceStatus } from "@prisma/client";
+import { ProformaStatus } from "@prisma/client";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 /** Generate next proforma number for a branch, e.g. "PI-2026-0004" */
@@ -25,7 +25,6 @@ export const createProformaInvoice = async (req: Request, res: Response) => {
       branchCode,
       proformaDate,
       dueDate,
-      // extra header fields
       ewayBillNo,
       challanNo,
       financedBy,
@@ -37,11 +36,8 @@ export const createProformaInvoice = async (req: Request, res: Response) => {
       dispatchedThrough,
       transportName,
       shippingAddress,
-      // items
       items = [],
-      // additional charges
       additionalCharges = [],
-      // totals / discount
       subTotal,
       taxableAmount,
       taxAmount,
@@ -55,12 +51,10 @@ export const createProformaInvoice = async (req: Request, res: Response) => {
       adjustType,
       adjustAmt,
       autoRoundOff,
-      // notes / terms / signature
       notes,
       termsConditions,
       showEmptySignatureBox,
       signatureUrl,
-      // custom fields (same Json pattern as Invoice)
       customFieldValues,
     } = req.body;
 
@@ -73,12 +67,9 @@ export const createProformaInvoice = async (req: Request, res: Response) => {
     const proforma = await prisma.proformaInvoice.create({
       data: {
         proformaNo,
-      party: {
-  connect: { id: Number(partyId) }
-},
+        party: { connect: { id: Number(partyId) } },
         proformaDate: proformaDate ? new Date(proformaDate) : new Date(),
         validTill: dueDate ? new Date(dueDate) : null,
-        // header fields
         ewayBillNo:        ewayBillNo        || null,
         challanNo:         challanNo         || null,
         financedBy:        financedBy        || null,
@@ -90,7 +81,6 @@ export const createProformaInvoice = async (req: Request, res: Response) => {
         dispatchedThrough: dispatchedThrough || null,
         transportName:     transportName     || null,
         shippingAddress:   shippingAddress   || null,
-        // totals
         subTotal:               subTotal               != null ? f(subTotal)               : null,
         taxableAmount:          taxableAmount           != null ? f(taxableAmount)           : null,
         taxAmount:              taxAmount               != null ? f(taxAmount)               : null,
@@ -98,23 +88,18 @@ export const createProformaInvoice = async (req: Request, res: Response) => {
         additionalChargesTotal: additionalChargesTotal  != null ? f(additionalChargesTotal)  : null,
         roundOff:               roundOff                != null ? f(roundOff)                : null,
         totalAmount:            f(totalAmount),
-        // discount
         discountType:  discountType  || null,
         discountPct:   f(discountPct),
         discountAmt:   f(discountAmt),
         adjustType:    adjustType    || null,
         adjustAmt:     f(adjustAmt),
         autoRoundOff:  Boolean(autoRoundOff),
-        // custom fields
         customFieldValues: customFieldValues || {},
-        // notes/terms
         notes:          notes          || null,
         termsConditions:termsConditions|| null,
         showEmptySignatureBox: Boolean(showEmptySignatureBox),
         signatureUrl:   signatureUrl   || null,
         status: ProformaStatus.DRAFT,
-
-        // ── Items ──
         items: {
           create: items.map((item: any) => ({
             productId:   item.productId   ? Number(item.productId)  : null,
@@ -133,8 +118,6 @@ export const createProformaInvoice = async (req: Request, res: Response) => {
             godownId:    item.godownId    ? Number(item.godownId) : null,
           })),
         },
-
-        // ── Additional Charges ──
         additionalCharges: {
           create: additionalCharges.map((c: any) => ({
             name:      c.name      || c.label || "",
@@ -168,7 +151,6 @@ export const getProformaInvoices = async (req: Request, res: Response) => {
 
     if (branchCode) where.branchCode = branchCode;
 
-    // ✅ FIX status (string → array → enum)
     if (status) {
       const statuses = String(status)
         .split(",")
@@ -176,7 +158,6 @@ export const getProformaInvoices = async (req: Request, res: Response) => {
       where.status = { in: statuses };
     }
 
-    // ✅ FIX date filters
     if (startDate || endDate) {
       where.proformaDate = {};
       if (startDate) where.proformaDate.gte = new Date(String(startDate));
@@ -198,10 +179,39 @@ export const getProformaInvoices = async (req: Request, res: Response) => {
             id: true,
             name: true,
             partyName: true,
+            mobileNumber: true,
+            gstin: true,
           },
         },
+        items: {
+          select: {
+            id: true,
+            productId: true,
+            productName: true,
+            hsnSac: true,
+            description: true,
+            quantity: true,
+            unit: true,
+            price: true,
+            discountPct: true,
+            discountAmt: true,
+            taxLabel: true,
+            taxRate: true,
+            taxAmount: true,
+            total: true,
+          },
+        },
+        additionalCharges: true,
+        discountType: true,
+        discountPct: true,
+        discountAmt: true,
+        adjustType: true,
+        adjustAmt: true,
+        autoRoundOff: true,
+        notes: true,
+        termsConditions: true,
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: { proformaDate: "desc" },
     });
 
     return res.json(proformas);
@@ -211,12 +221,11 @@ export const getProformaInvoices = async (req: Request, res: Response) => {
   }
 };
 
-// ─── GET ONE ──────────────────────────────────────────────────────────────────
+// ─── GET ONE ─────────────────────────────────────────────────────────────────
 
 export const getProformaInvoiceById = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-
     const proforma = await prisma.proformaInvoice.findUnique({
       where: { id: Number(id) },
       include: {
@@ -228,11 +237,9 @@ export const getProformaInvoiceById = async (req: Request, res: Response) => {
         },
         items: true,
         additionalCharges: true,
-        convertedInvoice: { select: { id: true, invoiceNo: true, status: true } },
       },
     });
-
-    if (!proforma) return res.status(404).json({ message: "Proforma invoice not found" });
+    if (!proforma) return res.status(404).json({ message: "Proforma not found" });
     return res.json(proforma);
   } catch (error: any) {
     console.error("GET PROFORMA ERROR:", error);
@@ -245,34 +252,40 @@ export const getProformaInvoiceById = async (req: Request, res: Response) => {
 export const updateProformaInvoice = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+
     const existing = await prisma.proformaInvoice.findUnique({ where: { id: Number(id) } });
     if (!existing) return res.status(404).json({ message: "Proforma not found" });
-    if (existing.status === ProformaStatus.CONVERTED) {
-      return res.status(400).json({ message: "Cannot edit a converted proforma invoice" });
-    }
 
     const {
-      partyId, branchCode, proformaDate, dueDate,
+      partyId,
+      branchCode,
+      proformaDate,
+      dueDate,
       ewayBillNo, challanNo, financedBy, salesman, emailId, warrantyPeriod,
       poNumber, vehicleNo, dispatchedThrough, transportName, shippingAddress,
-      items = [], additionalCharges = [],
-      subTotal, taxableAmount, taxAmount, discountAmount, additionalChargesTotal,
-      roundOff, totalAmount,
-      discountType, discountPct, discountAmt, adjustType, adjustAmt, autoRoundOff,
-      notes, termsConditions, showEmptySignatureBox, signatureUrl, customFieldValues,
+      items = [],
+      additionalCharges = [],
+      subTotal, taxableAmount, taxAmount, discountAmount,
+      additionalChargesTotal, roundOff, totalAmount,
+      discountType, discountPct, discountAmt,
+      adjustType, adjustAmt, autoRoundOff,
+      notes, termsConditions, showEmptySignatureBox, signatureUrl,
+      customFieldValues,
+      // FIX: allow status to be patched via the update endpoint as well
+      status,
     } = req.body;
 
-    // Delete old items & charges then recreate
+    // Delete existing items and charges before recreating
     await prisma.proformaInvoiceItem.deleteMany({ where: { proformaId: Number(id) } });
     await prisma.proformaAdditionalCharge.deleteMany({ where: { proformaId: Number(id) } });
 
     const updated = await prisma.proformaInvoice.update({
       where: { id: Number(id) },
       data: {
-        partyId:           partyId          ? Number(partyId) : existing.partyId,
+        partyId:           partyId          ? Number(partyId)          : existing.partyId,
         branchCode:        branchCode       ?? existing.branchCode,
         proformaDate:      proformaDate     ? new Date(proformaDate) : existing.proformaDate,
-        validTill:           dueDate          ? new Date(dueDate) : existing.validTill,
+        validTill:         dueDate          ? new Date(dueDate) : existing.validTill,
         ewayBillNo, challanNo, financedBy, salesman, emailId, warrantyPeriod,
         poNumber, vehicleNo, dispatchedThrough, transportName, shippingAddress,
         subTotal:               subTotal               != null ? f(subTotal)               : existing.subTotal,
@@ -288,6 +301,8 @@ export const updateProformaInvoice = async (req: Request, res: Response) => {
         showEmptySignatureBox: Boolean(showEmptySignatureBox),
         signatureUrl,
         customFieldValues: customFieldValues ?? existing.customFieldValues,
+        // Only update status if explicitly provided (used by CreateSalesInvoice to mark CONVERTED)
+        ...(status ? { status: status as ProformaStatus } : {}),
 
         items: {
           create: items.map((item: any) => ({
@@ -316,7 +331,6 @@ export const updateProformaInvoice = async (req: Request, res: Response) => {
             taxAmount: c.taxAmount != null ? f(c.taxAmount) : null,
           })),
         },
-
       },
       include: {
         party: { select: { id: true, name: true, partyName: true, mobileNumber: true } },
@@ -351,11 +365,49 @@ export const deleteProformaInvoice = async (req: Request, res: Response) => {
   }
 };
 
-// ─── CONVERT TO SALES INVOICE ────────────────────────────────────────────────
-// This endpoint:
-//  1. Marks the proforma as CONVERTED
-//  2. Returns the full proforma data so the frontend can pre-fill CreateSalesInvoice
-//  3. Optionally creates the invoice record if createInvoice=true in body
+// ─── PATCH STATUS ─────────────────────────────────────────────────────────────
+//
+// FIX: New dedicated status endpoint.
+// CreateSalesInvoice calls PATCH /api/proforma-invoices/:id/status with
+// { status: "CONVERTED" } AFTER the sales invoice is successfully saved.
+// This means the proforma status only changes once the invoice is confirmed.
+
+export const updateProformaStatus = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body as { status: string };
+
+    const validStatuses = Object.values(ProformaStatus);
+    if (!validStatuses.includes(status as ProformaStatus)) {
+      return res.status(400).json({ message: `Invalid status. Must be one of: ${validStatuses.join(", ")}` });
+    }
+
+    const existing = await prisma.proformaInvoice.findUnique({ where: { id: Number(id) } });
+    if (!existing) return res.status(404).json({ message: "Proforma not found" });
+
+    const updated = await prisma.proformaInvoice.update({
+      where: { id: Number(id) },
+      data: { status: status as ProformaStatus },
+    });
+
+    return res.json(updated);
+  } catch (error: any) {
+    console.error("UPDATE PROFORMA STATUS ERROR:", error);
+    return res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// ─── CONVERT TO SALES INVOICE (data-only — NO status change) ─────────────────
+//
+// FIX: This endpoint NO LONGER marks the proforma as CONVERTED.
+//
+// It only returns the full proforma data shaped for CreateSalesInvoice.
+// The status flip to CONVERTED happens in CreateSalesInvoice.handleSave()
+// which calls PATCH /api/proforma-invoices/:id/status AFTER the invoice
+// is successfully saved.
+//
+// This prevents the proforma from being marked CONVERTED if the user
+// navigates away from the sales invoice form without saving.
 
 export const convertProformaToInvoice = async (req: Request, res: Response) => {
   try {
@@ -378,17 +430,16 @@ export const convertProformaToInvoice = async (req: Request, res: Response) => {
 
     if (!proforma) return res.status(404).json({ message: "Proforma not found" });
     if (proforma.status === ProformaStatus.CONVERTED) {
-      return res.status(400).json({ message: "Already converted", convertedInvoiceId: proforma.convertedToInvoiceId });
+      return res.status(400).json({
+        message: "Already converted",
+        convertedInvoiceId: (proforma as any).convertedToInvoiceId ?? null,
+      });
     }
-
-    // Mark as converted
-
 
     // Shape the response so the frontend can directly populate CreateSalesInvoice state
     const payload = {
       proformaId:     proforma.id,
       proformaNumber: proforma.proformaNo,
-      // Party
       party: proforma.party
         ? {
             id:             proforma.party.id,
@@ -402,7 +453,6 @@ export const convertProformaToInvoice = async (req: Request, res: Response) => {
             balance:        proforma.party.openingBalance ? Number(proforma.party.openingBalance) : 0,
           }
         : null,
-      // Invoice meta fields
       invoiceDate:    proforma.proformaDate.toISOString().split("T")[0],
       dueDate:        proforma.validTill ? proforma.validTill.toISOString().split("T")[0] : null,
       ewayBillNo:     proforma.ewayBillNo,
@@ -416,10 +466,11 @@ export const convertProformaToInvoice = async (req: Request, res: Response) => {
       dispatchedThrough: proforma.dispatchedThrough,
       transportName:  proforma.transportName,
       shippingAddress:proforma.shippingAddress,
-      // Line items — mapped to match CreateSalesInvoice / InvoiceBuilderApp row shape
       lineItems: proforma.items.map(item => ({
         rowId:       `proforma-${item.id}`,
-        productId:   item.productId,
+        // FIX: Only include productId/itemId when it's a real linked product.
+        // Sending null productId causes Prisma to crash in the invoice controller.
+        ...(item.productId != null ? { productId: Number(item.productId), itemId: Number(item.productId) } : {}),
         name:        item.productName,
         description: item.description || "",
         hsn:         item.hsnSac || "",
@@ -434,7 +485,6 @@ export const convertProformaToInvoice = async (req: Request, res: Response) => {
         amount:      Number(item.total),
         total:       Number(item.total),
       })),
-      // Additional charges
       additionalCharges: proforma.additionalCharges.map(c => ({
         id:       c.id,
         label:    c.name,
@@ -443,7 +493,6 @@ export const convertProformaToInvoice = async (req: Request, res: Response) => {
         taxType:  c.taxLabel || "No Tax Applicable",
         taxLabel: c.taxLabel || "No Tax Applicable",
       })),
-      // Totals / discount
       subTotal:      proforma.subTotal      ? Number(proforma.subTotal)      : 0,
       taxAmount:     proforma.taxAmount     ? Number(proforma.taxAmount)     : 0,
       discountAmount:proforma.discountAmount? Number(proforma.discountAmount): 0,
@@ -454,10 +503,8 @@ export const convertProformaToInvoice = async (req: Request, res: Response) => {
       adjustType:    proforma.adjustType    || "+ Add",
       adjustAmt:     proforma.adjustAmt     || 0,
       autoRoundOff:  proforma.autoRoundOff,
-      // Notes / Terms
       notes:           proforma.notes           || "",
       termsConditions: proforma.termsConditions || "",
-      // Custom fields
       customFieldValues: proforma.customFieldValues || {},
     };
     return res.json(payload);

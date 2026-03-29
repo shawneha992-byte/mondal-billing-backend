@@ -633,7 +633,8 @@ model ProformaSettings {
 model InvoiceItem {
   id          Int      @id @default(autoincrement())
   invoiceId   Int
-  productId   Int
+  productId   Int?     // nullable — user may type a free-text item
+  productName String?  // always store the display name for free-text items
   quantity    Int
   price       Decimal  @db.Decimal(10, 2)
   total       Decimal  @db.Decimal(10, 2)
@@ -644,7 +645,7 @@ model InvoiceItem {
   discountPct Float?
   godown      Godown?  @relation(fields: [godownId], references: [godown_id])
   invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  product     Product  @relation(fields: [productId], references: [id])
+  product     Product? @relation(fields: [productId], references: [id])
 
   @@index([invoiceId])
   @@index([productId])
