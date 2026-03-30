@@ -84,18 +84,20 @@ export const getPartyItemWise = async (req: Request, res: Response) => {
       },
       include: {
         invoice: true,
-        product: true,
+        product: true,  // product is nullable (free-text items have no linked product)
       },
     });
 
     const formatted = items.map((item) => ({
-      partyId: item.invoice.partyId,
-      itemName: item.product.name,
-      itemCode: item.product.id,
+      partyId:  item.invoice.partyId,
+      // FIX: item.product is possibly null for free-text invoice items.
+      // Use optional chaining + fallback to productName stored on the item row itself.
+      itemName: item.product?.name ?? (item as any).productName ?? "Unknown Item",
+      itemCode: item.product?.id   ?? null,
       quantity: item.quantity,
-      amount: item.total,
-      type: "Sale",
-      date: item.invoice.createdAt,
+      amount:   Number(item.total),
+      type:     "Sale",
+      date:     item.invoice.createdAt,
     }));
 
     res.json({

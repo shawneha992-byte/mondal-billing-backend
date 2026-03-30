@@ -79,18 +79,24 @@ export const createInvoice = async (req: Request, res: Response) => {
 
   try {
     // ── PRE-FETCH: Read all products + stocks + settings BEFORE the transaction ──
-    const productIds = items.map((i: any) => i.productId);
+    // Filter out null/undefined productIds (free-text items have no linked product)
+    const productIds = items
+      .map((i: any) => i.productId)
+      .filter((id: any) => id != null && !isNaN(Number(id)))
+      .map(Number);
 
     const [allProducts, invoiceSettings] = await Promise.all([
-      prisma.product.findMany({ where: { id: { in: productIds } } }),
+      productIds.length > 0
+        ? prisma.product.findMany({ where: { id: { in: productIds } } })
+        : Promise.resolve([]),
       prisma.invoiceSettings.findFirst({ orderBy: { id: "asc" } }),
     ]);
 
     const productMap = new Map(allProducts.map((p) => [p.id, p]));
 
-    // Validate all products exist before entering tx
+    // Validate only items that have a productId (skip free-text items)
     for (const item of items) {
-      if (!productMap.has(item.productId)) {
+      if (item.productId != null && !productMap.has(Number(item.productId))) {
         return res.status(400).json({
           success: false,
           message: `Product not found (ID: ${item.productId})`,
@@ -98,16 +104,18 @@ export const createInvoice = async (req: Request, res: Response) => {
       }
     }
 
-    // Pre-fetch stocks for product items only (not Services)
-    const productTypeItems = items.filter((i: any) => productMap.get(i.productId)?.itemType === "Product");
+    // Pre-fetch stocks for product items only (not Services, not free-text)
+    const productTypeItems = items.filter(
+      (i: any) => i.productId != null && productMap.get(Number(i.productId))?.itemType === "Product"
+    );
 
     const stockChecks = await Promise.all(
       productTypeItems.map((item: any) =>
         item.godownId
           ? prisma.productStock.findUnique({
-              where: { productId_godownId: { productId: item.productId, godownId: item.godownId } },
+              where: { productId_godownId: { productId: Number(item.productId), godownId: item.godownId } },
             })
-          : prisma.productStock.findFirst({ where: { productId: item.productId } })
+          : prisma.productStock.findFirst({ where: { productId: Number(item.productId) } })
       )
     );
 
@@ -115,7 +123,7 @@ export const createInvoice = async (req: Request, res: Response) => {
     for (let i = 0; i < productTypeItems.length; i++) {
       const item    = productTypeItems[i];
       const stock   = stockChecks[i];
-      const product = productMap.get(item.productId)!;
+      const product = productMap.get(Number(item.productId))!;
       const available = Number(stock?.currentStock ?? stock?.openingStock ?? 0);
 
       if (!stock || available < item.quantity) {
@@ -126,34 +134,70 @@ export const createInvoice = async (req: Request, res: Response) => {
       }
     }
 
-    // ── Compute line-item totals OUTSIDE tx ──────────────────────────────────
-    let subTotal  = 0;
-    let taxAmount = 0;
+    // ════════════════════════════════════════════════════════════════
+    // COMPUTE TOTALS — same model as frontend (SISummary / CreateSalesInvoice)
+    //
+    // NEW MODEL: Invoice-level discount reduces the GST-inclusive total,
+    // then reverse-calculation splits the reduced total into taxable + tax.
+    //
+    // Step 1: Per-line taxable and tax (discount per line applied first)
+    // Step 2: preTotalAmount = itemsTaxableSum + itemsTaxSum + chargesTotal
+    // Step 3: afterDiscTotal = preTotalAmount - discountAmount (invoice-level disc)
+    // Step 4: Reverse-calculate:
+    //   scaleFactor = afterDiscTotal / preTotalAmount
+    //   subTotal    = itemsTaxableSum × scaleFactor  (stored as taxable)
+    //   taxAmount   = itemsTaxSum     × scaleFactor  (stored as tax)
+    // ════════════════════════════════════════════════════════════════
 
+    // ── Per-line taxable and tax (before invoice-level discount) ──────────────
+    let itemsTaxableSum = 0;
+    let itemsTaxSum     = 0;
+ 
     for (const item of items) {
-      const lineGross     = Number(item.price) * Number(item.quantity);
-      const discPct       = Number(item.discountPct ?? 0);
-      const discAmt       = Number(item.discount    ?? 0);
-      const totalDiscount = Math.round((lineGross * (discPct / 100) + discAmt) * 100) / 100;
-      const taxableBase   = Math.max(0, lineGross - totalDiscount);
-      const lineTax       = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
-      subTotal  += taxableBase;
-      taxAmount += lineTax;
+      const lineGross   = Number(item.price) * Number(item.quantity);
+      const discPct     = Number(item.discountPct ?? 0);
+      const discAmt     = Number(item.discount    ?? 0);
+      // discPct takes priority: when % is set, flat amount is ignored
+      const lineDiscAmt = discPct > 0
+        ? Math.round(lineGross * (discPct / 100) * 100) / 100
+        : Math.round(discAmt * 100) / 100;
+      const taxableBase  = Math.max(0, lineGross - lineDiscAmt);
+      const lineTax      = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
+      itemsTaxableSum   += taxableBase;
+      itemsTaxSum       += lineTax;
     }
-
-    // ── Additional charges total — now includes tax on each charge ────────────
-    const additionalChargesTotal: number = additionalCharges.reduce(
-      (sum: number, c: { name: string; amount: number; taxLabel?: string }) => {
-        const rate   = extractTaxRate(c.taxLabel ?? "");
-        const taxAmt = Math.round((c.amount ?? 0) * rate / 100 * 100) / 100;
-        return sum + (c.amount ?? 0) + taxAmt;
-      },
-      0
-    );
-
-    const taxableAmount     = subTotal - Number(discountAmount);
-    const totalAmount       = taxableAmount + taxAmount + additionalChargesTotal + Number(roundOff);
-    const outstandingAmount = totalAmount - Number(receivedAmount);
+ 
+    // ── Additional charges total ──────────────────────────────────────────
+    let chargesBase = 0;
+    let chargesTax  = 0;
+    for (const c of additionalCharges as { name: string; amount: number; taxLabel?: string }[]) {
+      const rate   = extractTaxRate(c.taxLabel ?? "");
+      const taxAmt = Math.round((c.amount ?? 0) * rate / 100 * 100) / 100;
+      chargesBase += (c.amount ?? 0);
+      chargesTax  += taxAmt;
+    }
+    const additionalChargesTotal = Math.round((chargesBase + chargesTax) * 100) / 100;
+ 
+    // ── GST-inclusive total before invoice-level discount ─────────────────
+    const preTotalAmount = Math.round(
+      (itemsTaxableSum + itemsTaxSum + additionalChargesTotal) * 100
+    ) / 100;
+ 
+    // ── Invoice-level discount (applied on GST-inclusive total) ───────────
+    // discountAmount passed from frontend is already computed (invoiceDiscAmt).
+    const invDiscAmt     = Math.min(Number(discountAmount) || 0, preTotalAmount);
+    const afterDiscTotal = Math.max(0, Math.round((preTotalAmount - invDiscAmt) * 100) / 100);
+ 
+    // ── subTotal and taxAmount: NOT reverse-calculated ────────────────────
+    // The invoice-level discount only reduces totalAmount.
+    // Taxable amount and tax stored in the DB reflect the true per-line values.
+    const subTotal      = Math.round(itemsTaxableSum * 100) / 100;
+    const taxAmount     = Math.round(itemsTaxSum     * 100) / 100;
+    const taxableAmount = subTotal; // alias used in the Invoice.create call below
+ 
+    // ── Final totals ──────────────────────────────────────────────────────
+    const totalAmount       = Math.round((afterDiscTotal + Number(roundOff)) * 100) / 100;
+    const outstandingAmount = Math.max(0, Math.round((totalAmount - Number(receivedAmount)) * 100) / 100);
 
     // ── Build invoice number OUTSIDE tx ──────────────────────────────────────
     const usePrefix       = invoiceSettings?.enablePrefix ?? false;
@@ -185,11 +229,12 @@ export const createInvoice = async (req: Request, res: Response) => {
     for (let i = 0; i < productTypeItems.length; i++) {
       const item  = productTypeItems[i];
       const stock = stockChecks[i]!;
+      const pid   = Number(item.productId);
       const newBalance = Number(stock.currentStock ?? stock.openingStock ?? 0) - Number(item.quantity);
-      stockUpdateMap.set(item.productId, {
+      stockUpdateMap.set(pid, {
         stockId:   stock.id,
         newBalance,
-        productId: item.productId,
+        productId: pid,
         godownId:  stock.godownId,
       });
     }
@@ -237,47 +282,57 @@ export const createInvoice = async (req: Request, res: Response) => {
             signatureUrl:          signatureUrl          ?? null,
             showEmptySignatureBox: showEmptySignatureBox ?? false,
             status: deriveStatus(Number(receivedAmount), totalAmount),
-            items: {
-              create: items.map((item: any) => {
-                const lineGross     = Number(item.price) * Number(item.quantity);
-                const discPct       = Number(item.discountPct ?? 0);
-                const discAmt       = Number(item.discount    ?? 0);
-                const pctDiscount   = Math.round(lineGross * (discPct / 100) * 100) / 100;
-                const totalDiscount = Math.round((pctDiscount + discAmt) * 100) / 100;
-                const taxableBase   = Math.max(0, lineGross - totalDiscount);
-                const taxAmt        = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
-                const lineTotal     = Math.round((taxableBase + taxAmt) * 100) / 100;
-
-                return {
-                  productId:   item.productId,
-                  godownId:    item.godownId ?? null,
-                  quantity:    item.quantity,
-                  price:       item.price,
-                  discountPct: discPct,
-                  discount:    totalDiscount,
-                  taxRate:     item.taxRate ?? 0,
-                  taxAmount:   taxAmt,
-                  total:       lineTotal,
-                };
-              }),
-            },
-            // ── Additional charges — now save taxLabel + taxAmount ──
-            ...(additionalCharges.length > 0 && {
-              additionalCharges: {
-                create: additionalCharges.map((c: { name: string; amount: number; taxLabel?: string }) => {
-                  const rate   = extractTaxRate(c.taxLabel ?? "");
-                  const taxAmt = Math.round((c.amount ?? 0) * rate / 100 * 100) / 100;
-                  return {
-                    name:      c.name,
-                    amount:    c.amount,
-                    taxLabel:  c.taxLabel ?? "No Tax Applicable",
-                    taxAmount: taxAmt,
-                  };
-                }),
-              },
-            }),
           },
         });
+
+        // ── 1b. Insert items one by one using typed Prisma create.
+        //        We cast to (tx as any) to bypass the stale generated client
+        //        type that still marks productId as NOT NULL — after running
+        //        `prisma migrate` + `prisma generate` you can remove the cast.
+        //        This avoids ALL raw-SQL binary-protocol issues (22P03).
+        for (const item of items) {
+          const lineGross     = Number(item.price) * Number(item.quantity);
+          const discPct       = Number(item.discountPct ?? 0);
+          const discAmt       = Number(item.discount    ?? 0);
+          const pctDiscount   = Math.round(lineGross * (discPct / 100) * 100) / 100;
+          const totalDiscount = Math.round((pctDiscount + discAmt) * 100) / 100;
+          const taxableBase   = Math.max(0, lineGross - totalDiscount);
+          const taxAmt        = Math.round(taxableBase * ((item.taxRate || 0) / 100) * 100) / 100;
+          const lineTotal     = Math.round((taxableBase + taxAmt) * 100) / 100;
+
+          await (tx.invoiceItem.create as any)({
+            data: {
+              invoiceId:   inv.id,
+              productId:   item.productId != null ? Number(item.productId) : null,
+              productName: item.productName ?? item.name ?? null,
+              godownId:    item.godownId   != null ? Number(item.godownId)  : null,
+              quantity:    Number(item.quantity),
+              price:       Number(item.price),
+              discountPct: discPct,
+              discount:    totalDiscount,
+              taxRate:     Number(item.taxRate ?? 0),
+              taxAmount:   taxAmt,
+              total:       lineTotal,
+            },
+          });
+        } // ← closes for (const item of items)
+
+        // ── 1c. Additional charges
+        if (additionalCharges.length > 0) {
+          await tx.invoiceAdditionalCharge.createMany({
+            data: additionalCharges.map((c: { name: string; amount: number; taxLabel?: string }) => {
+              const rate   = extractTaxRate(c.taxLabel ?? "");
+              const taxAmt = Math.round((c.amount ?? 0) * rate / 100 * 100) / 100;
+              return {
+                invoiceId: inv.id,
+                name:      c.name,
+                amount:    c.amount,
+                taxLabel:  c.taxLabel ?? "No Tax Applicable",
+                taxAmount: taxAmt,
+              };
+            }),
+          });
+        }
 
         // 2. Stock updates — all in PARALLEL
         if (stockUpdateMap.size > 0) {
@@ -350,7 +405,7 @@ if (req.body.proformaId) {
     if (stockUpdateMap.size > 0) {
       await prisma.stockLedger.createMany({
         data: Array.from(stockUpdateMap.values()).map(({ productId, godownId, newBalance }) => {
-          const item = items.find((i: any) => i.productId === productId)!;
+          const item = items.find((i: any) => Number(i.productId) === productId)!;
           return {
             productId,
             godownId:    godownId ?? null,
@@ -383,36 +438,81 @@ if (req.body.proformaId) {
 ═══════════════════════════════════════════════════════════ */
 export const getInvoices = async (req: Request, res: Response) => {
   try {
-    const { partyId, status, limit, page } = req.query;
+    const { partyId, status, limit, page, from, to, search, sortField, sortDir } = req.query;
 
     const where: any = {};
     if (partyId) where.partyId = Number(partyId);
     if (status) {
-      const statuses = String(status).split(",").map((s) => s.trim()).filter(Boolean);
+      const statuses = String(status).split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
       where.status   = statuses.length === 1 ? statuses[0] : { in: statuses };
     }
 
-    const take = limit ? Math.min(500, Number(limit)) : undefined;
-    const skip = page && take ? (Number(page) - 1) * take : undefined;
+    // ── Date range filter ────────────────────────────────────────────────────
+    if (from || to) {
+      where.invoiceDate = {};
+      if (from) where.invoiceDate.gte = new Date(String(from));
+      if (to) {
+        const toDate = new Date(String(to));
+        toDate.setHours(23, 59, 59, 999);
+        where.invoiceDate.lte = toDate;
+      }
+    }
 
-    const invoices = await (prisma.invoice.findMany as any)({
-      where,
-      include: {
-        party:             true,
-        items:             { include: { product: true } },
-        additionalCharges: true,
-        allocations:       true,
-        salesReturns:      true,
-      },
-      orderBy: { createdAt: "desc" },
-      ...(take ? { take } : {}),
-      ...(skip ? { skip } : {}),
+    // ── Search filter ────────────────────────────────────────────────────────
+    if (search) {
+      const q = String(search).trim();
+      where.OR = [
+        { invoiceNo:  { contains: q, mode: "insensitive" } },
+        { party:      { name:     { contains: q, mode: "insensitive" } } },
+        { party:      { partyName:{ contains: q, mode: "insensitive" } } },
+        { salesman:   { contains: q, mode: "insensitive" } },
+      ];
+    }
+
+    // ── Sorting ──────────────────────────────────────────────────────────────
+    const dir = sortDir === "asc" ? "asc" : "desc";
+    const allowedSortFields: Record<string, string> = {
+      date:       "invoiceDate",
+      invoiceNo:  "invoiceNo",
+      amount:     "totalAmount",
+      status:     "status",
+      createdAt:  "createdAt",
+    };
+    const orderByField = allowedSortFields[String(sortField ?? "date")] ?? "invoiceDate";
+    const orderBy = { [orderByField]: dir };
+
+    const take = limit ? Math.min(500, Number(limit)) : 50;
+    const skip = page ? (Number(page) - 1) * take : 0;
+
+    // ── Fetch invoices + total count in parallel ──────────────────────────────
+    const [invoices, total] = await Promise.all([
+      (prisma.invoice.findMany as any)({
+        where,
+        include: {
+          party:             true,
+          // Use items without joining product — product may be null for free-text items.
+          // The frontend mapper (fromSaleInvoice) already handles missing product gracefully.
+          items:             true,
+          additionalCharges: true,
+          allocations:       true,
+          salesReturns:      true,
+        },
+        orderBy,
+        take,
+        skip,
+      }),
+      prisma.invoice.count({ where }),
+    ]);
+
+    const pages = Math.ceil(total / take);
+
+    return res.json({
+      success: true,
+      data: { invoices, total, page: Number(page ?? 1), pages },
     });
-
-    return res.json({ success: true, data: invoices });
-  } catch (error) {
+  } catch (error: any) {
     console.error("❌ Fetch Invoices Error:", error);
-    return res.status(500).json({ success: false, message: "Failed to fetch invoices" });
+    return res.status(500).json({ success: false, message: error.message ?? "Failed to fetch invoices" });
   }
 };
 
@@ -429,7 +529,9 @@ export const getInvoiceById = async (req: Request, res: Response) => {
       where: { id },
       include: {
         party:             true,
-        items:             { include: { product: true } },
+        // Fetch items without joining product — productId may be null for free-text items.
+        // Fetch product separately only for items that have a productId.
+        items:             true,
         additionalCharges: true,
         allocations:       true,
         salesReturns:      true,
@@ -437,10 +539,27 @@ export const getInvoiceById = async (req: Request, res: Response) => {
     });
 
     if (!invoice) return res.status(404).json({ success: false, message: "Invoice not found" });
+
+    // Enrich items with product data where productId exists
+    const productIds = (invoice.items ?? [])
+      .map((i: any) => i.productId)
+      .filter((id: any) => id != null)
+      .map(Number);
+
+    const products = productIds.length > 0
+      ? await prisma.product.findMany({ where: { id: { in: productIds } } })
+      : [];
+    const productMap = new Map(products.map((p) => [p.id, p]));
+
+    invoice.items = (invoice.items ?? []).map((item: any) => ({
+      ...item,
+      product: item.productId != null ? (productMap.get(Number(item.productId)) ?? null) : null,
+    }));
+
     return res.json({ success: true, data: invoice });
-  } catch (error) {
+  } catch (error: any) {
     console.error("❌ Fetch Invoice Error:", error);
-    return res.status(500).json({ success: false, message: "Failed to fetch invoice" });
+    return res.status(500).json({ success: false, message: error.message ?? "Failed to fetch invoice" });
   }
 };
 
@@ -529,17 +648,19 @@ export const cancelInvoice = async (req: Request, res: Response) => {
         if (invoice.status === InvoiceStatus.CANCELLED)
           throw new Error("Invoice is already cancelled");
 
-        // Restore stock in PARALLEL
+        // Restore stock in PARALLEL — skip free-text items (no productId)
         await Promise.all(
-          invoice.items.map(async (item) => {
-            const stock = await tx.productStock.findFirst({ where: { productId: item.productId } });
-            if (stock) {
-              await tx.productStock.update({
-                where: { id: stock.id },
-                data:  { currentStock: { increment: item.quantity } },
-              });
-            }
-          })
+          invoice.items
+            .filter((item) => item.productId != null)
+            .map(async (item) => {
+              const stock = await tx.productStock.findFirst({ where: { productId: item.productId! } });
+              if (stock) {
+                await tx.productStock.update({
+                  where: { id: stock.id },
+                  data:  { currentStock: { increment: item.quantity } },
+                });
+              }
+            })
         );
 
         // Reversal ledger entry
@@ -699,28 +820,42 @@ export const getPartyItemWiseReport = async (req: Request, res: Response) => {
   try {
     const invoices = await prisma.invoice.findMany({
       where:   { partyId },
-      include: { items: { include: { product: true } } },
+      include: { items: true },   // no product join — productId may be null
       orderBy: { createdAt: "desc" },
     });
 
+    // Collect all non-null productIds and fetch in one query
+    const productIds = invoices
+      .flatMap((inv) => inv.items.map((i: any) => i.productId))
+      .filter((id: any) => id != null)
+      .map(Number);
+
+    const products = productIds.length > 0
+      ? await prisma.product.findMany({ where: { id: { in: productIds } } })
+      : [];
+    const productMap = new Map(products.map((p) => [p.id, p]));
+
     const data = invoices.flatMap((invoice) =>
-      invoice.items.map((item) => ({
-        partyId,
-        invoiceNo: invoice.invoiceNo,
-        itemName:  item.product.name,
-        itemCode:  item.product.itemCode ?? null,
-        quantity:  item.quantity,
-        price:     Number(item.price),
-        amount:    Number(item.total),
-        type:      "Sale",
-        date:      invoice.createdAt,
-      }))
+      invoice.items.map((item: any) => {
+        const product = item.productId != null ? productMap.get(Number(item.productId)) : null;
+        return {
+          partyId,
+          invoiceNo: invoice.invoiceNo,
+          itemName:  product?.name ?? item.productName ?? "Free-text Item",
+          itemCode:  product?.itemCode ?? null,
+          quantity:  item.quantity,
+          price:     Number(item.price),
+          amount:    Number(item.total),
+          type:      "Sale",
+          date:      invoice.createdAt,
+        };
+      })
     );
 
     return res.json({ success: true, data });
-  } catch (error) {
+  } catch (error: any) {
     console.error("❌ Item-wise Report Error:", error);
-    return res.status(500).json({ success: false, message: "Failed to fetch item-wise report" });
+    return res.status(500).json({ success: false, message: error.message ?? "Failed to fetch item-wise report" });
   }
 };
 

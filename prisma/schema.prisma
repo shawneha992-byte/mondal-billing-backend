@@ -119,7 +119,11 @@ model Product {
   trackBatchExpiry     Boolean               @default(false)
   wholesaleEnabled     Boolean               @default(false)
   wholesalePrice       Decimal?              @db.Decimal(10, 2)
-  taxType              String                @default("without_tax")
+taxType              String                @default("without_tax")
+baseSalesPrice       Decimal?              @db.Decimal(10, 2)   // always the pre-tax price
+salesPriceInclTax    Boolean               @default(false)      // was the entered price inclusive?
+basePurchasePrice    Decimal?              @db.Decimal(10, 2)   // always the pre-tax purchase price
+purchasePriceInclTax Boolean               @default(false)      // was the entered purchase price inclusive?
   deliveryChallanItems DeliveryChallanItem[]
   proformaInvoiceItems ProformaInvoiceItem[]
 
@@ -156,6 +160,7 @@ model Godown {
   PurchaseInvoiceItem  PurchaseInvoiceItem[]
   QuotationItem        QuotationItem[]
   stockLedger          StockLedger[]
+  salesReturnItems   SalesReturnItem[]
 }
 
 model ProductStock {
@@ -313,6 +318,7 @@ model Invoice {
   showEmptySignatureBox  Boolean                   @default(false)
   signatureUrl           String?
   customFieldValues      Json?                     @default("{}")
+  snapshotMetaFields  Json?
   dispatchedThrough      String?
   financeDetails         Json?
   paymentDetails         Json?
@@ -384,24 +390,34 @@ model PartyAddress {
 }
 
 model SalesReturn {
-  id          Int               @id @default(autoincrement())
-  invoiceId   Int
-  partyId     Int
-  totalAmount Float
-  createdAt   DateTime          @default(now())
-  invoice     Invoice           @relation(fields: [invoiceId], references: [id])
-  party       Party             @relation(fields: [partyId], references: [id])
-  items       SalesReturnItem[]
+  id           Int               @id @default(autoincrement())
+  invoiceId    Int             
+  partyId      Int
+  totalAmount  Float
+  reason       String?
+  notes        String?
+  returnStatus String            @default("Refunded")
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  invoice      Invoice           @relation(fields: [invoiceId], references: [id])
+  party        Party             @relation(fields: [partyId], references: [id])
+  items        SalesReturnItem[]
+
+  @@index([partyId])
 }
 
 model SalesReturnItem {
-  id            Int         @id @default(autoincrement())
+  id            Int          @id @default(autoincrement())
   salesReturnId Int
   productId     Int
   quantity      Int
   price         Float
-  product       Product     @relation(fields: [productId], references: [id])
-  salesReturn   SalesReturn @relation(fields: [salesReturnId], references: [id])
+  godownId      Int?         // ← which godown stock is returned to
+
+  product       Product      @relation(fields: [productId], references: [id])
+  salesReturn   SalesReturn  @relation(fields: [salesReturnId], references: [id], onDelete: Cascade)
+  godown        Godown?      @relation(fields: [godownId], references: [godown_id])
 }
 
 model Quotation {
@@ -629,7 +645,8 @@ model ProformaSettings {
 model InvoiceItem {
   id          Int      @id @default(autoincrement())
   invoiceId   Int
-  productId   Int
+  productId   Int?     // nullable — user may type a free-text item
+  productName String?  // always store the display name for free-text items
   quantity    Int
   price       Decimal  @db.Decimal(10, 2)
   total       Decimal  @db.Decimal(10, 2)
@@ -640,7 +657,7 @@ model InvoiceItem {
   discountPct Float?
   godown      Godown?  @relation(fields: [godownId], references: [godown_id])
   invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  product     Product  @relation(fields: [productId], references: [id])
+  product     Product? @relation(fields: [productId], references: [id])
 
   @@index([invoiceId])
   @@index([productId])

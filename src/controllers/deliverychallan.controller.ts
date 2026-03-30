@@ -20,6 +20,22 @@ function computeItemTotal(qty: number, price: number, discPct: number, discAmt: 
   return { total: Math.max(0, afterDisc + taxAmount), taxAmount };
 }
 
+// ── Helper: include shape for items WITH stock ────────────────────────────────
+// Reused in getChallanById, listChallans, and duplicateChallan so every
+// endpoint that returns challan data also returns product stock.
+const ITEM_INCLUDE_WITH_STOCK = {
+  product: {
+    select: {
+      id: true,
+      name: true,
+      ProductStock: {
+        select: { currentStock: true, godownId: true },
+      },
+    },
+  },
+  godown: true,
+} as const;
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  SETTINGS
 // ══════════════════════════════════════════════════════════════════════════════
@@ -86,36 +102,36 @@ export async function listChallans(req: Request, res: Response) {
     const branchCode = (req as any).user?.branch_code ?? undefined;
     const { status, from, to, search, page = "1", limit = "50" } = req.query as Record<string, string>;
 
-const where: any = {};
+    const where: any = {};
 
-// ✅ STATUS
-if (status && status !== "ALL") {
-  where.status = String(status).toUpperCase();
-}
+    // STATUS
+    if (status && status !== "ALL") {
+      where.status = String(status).toUpperCase();
+    }
 
-// ✅ DATE (SAFE)
-if (from && to) {
-  const fromDate = new Date(from);
-  const toDate = new Date(to);
+    // DATE
+    if (from && to) {
+      const fromDate = new Date(from);
+      const toDate = new Date(to);
 
-  if (!isNaN(fromDate.getTime()) && !isNaN(toDate.getTime())) {
-    fromDate.setHours(0, 0, 0, 0);
-    toDate.setHours(23, 59, 59, 999);
+      if (!isNaN(fromDate.getTime()) && !isNaN(toDate.getTime())) {
+        fromDate.setHours(0, 0, 0, 0);
+        toDate.setHours(23, 59, 59, 999);
 
-    where.challanDate = {
-      gte: fromDate,
-      lte: toDate,
-    };
-  }
-}
+        where.challanDate = {
+          gte: fromDate,
+          lte: toDate,
+        };
+      }
+    }
 
-// ✅ SEARCH
-if (search) {
-  where.OR = [
-    { challanNo: { contains: search, mode: "insensitive" } },
-    { party: { name: { contains: search, mode: "insensitive" } } },
-  ];
-}
+    // SEARCH
+    if (search) {
+      where.OR = [
+        { challanNo: { contains: search, mode: "insensitive" } },
+        { party: { name: { contains: search, mode: "insensitive" } } },
+      ];
+    }
 
     const skip = (Number(page) - 1) * Number(limit);
     const [total, challans] = await Promise.all([
@@ -126,8 +142,18 @@ if (search) {
         skip,
         take: Number(limit),
         include: {
-          party: { select: { id: true, name: true, mobileNumber: true, billingAddress: true, shippingAddress: true, gstin: true } },
-          items: { include: { product: { select: { id: true, name: true } } } },
+          party: {
+            select: {
+              id: true,
+              name: true,
+              mobileNumber: true,
+              billingAddress: true,
+              shippingAddress: true,
+              gstin: true,
+            },
+          },
+          // FIX: include ProductStock so frontend can display current stock
+          items: { include: ITEM_INCLUDE_WITH_STOCK },
           additionalCharges: true,
         },
       }),
@@ -151,7 +177,8 @@ export async function getChallanById(req: Request, res: Response) {
       where: { id },
       include: {
         party: true,
-        items: { include: { product: true, godown: true } },
+        // FIX: include ProductStock so stock column is populated in the Add Items modal
+        items: { include: ITEM_INCLUDE_WITH_STOCK },
         additionalCharges: true,
         invoices: { select: { id: true, invoiceNo: true, status: true } },
       },
@@ -213,69 +240,87 @@ export async function createChallan(req: Request, res: Response) {
         subTotal += Number(i.quantity) * Number(i.price);
         taxAmountTotal += taxAmount;
         return {
-          productId: i.productId ? Number(i.productId) : null,
-          productName: i.productName,
-          hsnSac: i.hsnSac,
-          description: i.description,
-          quantity: Number(i.quantity),
-          unit: i.unit ?? "PCS",
-          price: Number(i.price),
+          productId:   i.productId ? Number(i.productId) : null,
+          productName: i.productName || i.name || "Item",
+          hsnSac:      i.hsnSac || null,
+          description: i.description || null,
+          quantity:    Number(i.quantity),
+          unit:        i.unit || "PCS",
+          price:       Number(i.price),
           discountPct: Number(i.discountPct ?? 0),
           discountAmt: Number(i.discountAmt ?? 0),
-          taxLabel: i.taxLabel ?? "None",
-          taxRate: Number(i.taxRate ?? 0),
-          taxAmount,
-          total,
-          godownId: i.godownId ? Number(i.godownId) : null,
+          taxLabel:    i.taxLabel || "None",
+          taxRate:     Number(i.taxRate ?? 0),
+          taxAmount:   taxAmount,
+          total:       total,
+          godownId:    i.godownId ? Number(i.godownId) : null,
         };
       });
 
-      const chargesTotal = additionalCharges.reduce((s: number, c: any) => s + Number(c.amount ?? 0), 0);
-      const effectiveDiscount = Number(discountPct ?? 0) > 0
-        ? (subTotal + chargesTotal) * Number(discountPct) / 100
-        : Number(discountAmt ?? 0);
-      const roundOff = autoRoundOff ? Number(roundOffAmt ?? 0) : 0;
-      const totalAmount = subTotal + chargesTotal - effectiveDiscount + taxAmountTotal + roundOff;
+      const chargesTotal = (additionalCharges as any[]).reduce(
+        (s: number, c: any) => s + Number(c.amount ?? 0), 0
+      );
+      const discAmt = Number(discountAmt ?? 0);
+      const discPct = Number(discountPct ?? 0);
+      const discValue = discPct > 0 ? subTotal * discPct / 100 : discAmt;
+      const afterDisc = Math.max(0, subTotal + chargesTotal - discValue);
+      const roundOff = autoRoundOff
+        ? Math.ceil(afterDisc + taxAmountTotal) - (afterDisc + taxAmountTotal)
+        : Number(roundOffAmt ?? 0);
+      const totalAmount = afterDisc + taxAmountTotal + roundOff;
 
       const created = await tx.deliveryChallan.create({
         data: {
           challanNo,
-          partyId: Number(partyId),
+          partyId:           Number(partyId),
           branchCode,
-          challanDate: challanDate ? new Date(challanDate) : new Date(),
-          eWayBillNo, challanNoRef, financedBy, salesman, emailId,
-          warrantyPeriod, poNumber, vehicleNo, dispatchedThrough, transportName,
-          shippingAddress,
+          challanDate:       challanDate ? new Date(challanDate) : new Date(),
+          eWayBillNo:        eWayBillNo        || null,
+          challanNoRef:      challanNoRef      || null,
+          financedBy:        financedBy        || null,
+          salesman:          salesman          || null,
+          emailId:           emailId           || null,
+          warrantyPeriod:    warrantyPeriod    || null,
+          poNumber:          poNumber          || null,
+          vehicleNo:         vehicleNo         || null,
+          dispatchedThrough: dispatchedThrough || null,
+          transportName:     transportName     || null,
+          shippingAddress:   shippingAddress   || null,
+          discountType:      discountType      || null,
+          discountPct:       discPct,
+          discountAmt:       discAmt,
+          autoRoundOff:      Boolean(autoRoundOff),
+          roundOffAmt:       Number(roundOffAmt ?? 0),
+          customFieldValues: customFieldValues || {},
+          notes:             notes             || null,
+          termsConditions:   termsConditions   || null,
+          showEmptySignatureBox: Boolean(showEmptySignatureBox),
+          signatureUrl:      signatureUrl      || null,
           subTotal,
-          taxAmount: taxAmountTotal,
-          discountAmount: effectiveDiscount,
+          taxAmount:         taxAmountTotal,
+          discountAmount:    discValue,
           additionalChargesTotal: chargesTotal,
           roundOff,
           totalAmount,
-          discountType: discountType ?? "After Tax",
-          discountPct: Number(discountPct ?? 0),
-          discountAmt: Number(discountAmt ?? 0),
-          autoRoundOff: Boolean(autoRoundOff),
-          roundOffAmt: Number(roundOffAmt ?? 0),
-          customFieldValues: customFieldValues ?? {},
-          notes, termsConditions,
-          showEmptySignatureBox: Boolean(showEmptySignatureBox),
-          signatureUrl,
           status: "OPEN",
           items: { create: itemRows },
           additionalCharges: {
-            create: additionalCharges.map((c: any) => ({
-              name: c.label ?? c.name,
-              amount: Number(c.amount),
-              taxLabel: c.taxLabel ?? c.tax ?? "No Tax Applicable",
-              taxAmount: 0,
+            create: (additionalCharges as any[]).map((c: any) => ({
+              name:      c.label || c.name || "",
+              amount:    Number(c.amount ?? 0),
+              taxLabel:  c.taxLabel || "No Tax Applicable",
+              taxAmount: null,
             })),
           },
         },
-        include: { items: true, additionalCharges: true, party: true },
+        include: {
+          party: true,
+          items: { include: ITEM_INCLUDE_WITH_STOCK },
+          additionalCharges: true,
+        },
       });
 
-      // Increment sequence AFTER successful create
+      // Increment sequence
       if (settingsRec) {
         await tx.deliveryChallanSettings.update({
           where: { id: settingsRec.id },
@@ -288,7 +333,6 @@ export async function createChallan(req: Request, res: Response) {
 
     return res.status(201).json(challan);
   } catch (err: any) {
-    if (err.code === "P2002") return res.status(409).json({ error: "Challan number already exists. Please try again." });
     return res.status(500).json({ error: err.message });
   }
 }
@@ -301,23 +345,25 @@ export async function createChallan(req: Request, res: Response) {
 export async function updateChallan(req: Request, res: Response) {
   try {
     const id = Number(req.params.id);
-    const existing = await prisma.deliveryChallan.findUnique({ where: { id } });
-    if (!existing) return res.status(404).json({ error: "Challan not found" });
-    if (existing.status === "CLOSED") return res.status(400).json({ error: "Closed challan cannot be edited" });
-
     const {
-      partyId, challanDate,
+      partyId,
+      challanDate,
       eWayBillNo, challanNoRef, financedBy, salesman, emailId,
       warrantyPeriod, poNumber, vehicleNo, dispatchedThrough, transportName,
       shippingAddress,
       discountType, discountPct, discountAmt,
       autoRoundOff, roundOffAmt,
-      customFieldValues, notes, termsConditions,
+      customFieldValues,
+      notes, termsConditions,
       showEmptySignatureBox, signatureUrl,
       items = [],
       additionalCharges = [],
     } = req.body;
 
+    const existing = await prisma.deliveryChallan.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: "Challan not found" });
+
+    // ── Recalculate totals from the new items ─────────────────────────────
     let subTotal = 0, taxAmountTotal = 0;
     const itemRows = items.map((i: any) => {
       const { total, taxAmount } = computeItemTotal(
@@ -328,70 +374,91 @@ export async function updateChallan(req: Request, res: Response) {
       subTotal += Number(i.quantity) * Number(i.price);
       taxAmountTotal += taxAmount;
       return {
-        productId: i.productId ? Number(i.productId) : null,
-        productName: i.productName,
-        hsnSac: i.hsnSac,
-        description: i.description,
-        quantity: Number(i.quantity),
-        unit: i.unit ?? "PCS",
-        price: Number(i.price),
+        productId:   i.productId ? Number(i.productId) : null,
+        productName: i.productName || i.name || "Item",
+        hsnSac:      i.hsnSac || null,
+        description: i.description || null,
+        quantity:    Number(i.quantity),
+        unit:        i.unit || "PCS",
+        price:       Number(i.price),
         discountPct: Number(i.discountPct ?? 0),
         discountAmt: Number(i.discountAmt ?? 0),
-        taxLabel: i.taxLabel ?? "None",
-        taxRate: Number(i.taxRate ?? 0),
+        taxLabel:    i.taxLabel || "None",
+        taxRate:     Number(i.taxRate ?? 0),
         taxAmount,
         total,
-        godownId: i.godownId ? Number(i.godownId) : null,
+        godownId:    i.godownId ? Number(i.godownId) : null,
       };
     });
 
-    const chargesTotal = additionalCharges.reduce((s: number, c: any) => s + Number(c.amount ?? 0), 0);
-    const effectiveDiscount = Number(discountPct ?? 0) > 0
-      ? (subTotal + chargesTotal) * Number(discountPct) / 100
-      : Number(discountAmt ?? 0);
-    const roundOff = autoRoundOff ? Number(roundOffAmt ?? 0) : 0;
-    const totalAmount = subTotal + chargesTotal - effectiveDiscount + taxAmountTotal + roundOff;
+    const chargesTotal = (additionalCharges as any[]).reduce(
+      (s: number, c: any) => s + Number(c.amount ?? 0), 0
+    );
+    const discAmt = Number(discountAmt ?? 0);
+    const discPct = Number(discountPct ?? 0);
+    const discValue = discPct > 0 ? subTotal * discPct / 100 : discAmt;
+    const afterDisc = Math.max(0, subTotal + chargesTotal - discValue);
+    const roundOff = autoRoundOff
+      ? Math.ceil(afterDisc + taxAmountTotal) - (afterDisc + taxAmountTotal)
+      : Number(roundOffAmt ?? 0);
+    const totalAmount = afterDisc + taxAmountTotal + roundOff;
 
-    const challan = await prisma.$transaction(async (tx) => {
+    const updated = await prisma.$transaction(async (tx) => {
+      // Delete old items and charges, then recreate
       await tx.deliveryChallanItem.deleteMany({ where: { challanId: id } });
       await tx.deliveryChallanAdditionalCharge.deleteMany({ where: { challanId: id } });
 
       return tx.deliveryChallan.update({
         where: { id },
         data: {
-          partyId: partyId ? Number(partyId) : existing.partyId,
-          challanDate: challanDate ? new Date(challanDate) : existing.challanDate,
-          eWayBillNo, challanNoRef, financedBy, salesman, emailId,
-          warrantyPeriod, poNumber, vehicleNo, dispatchedThrough, transportName,
-          shippingAddress,
-          subTotal, taxAmount: taxAmountTotal,
-          discountAmount: effectiveDiscount,
-          additionalChargesTotal: chargesTotal,
-          roundOff, totalAmount,
-          discountType: discountType ?? "After Tax",
-          discountPct: Number(discountPct ?? 0),
-          discountAmt: Number(discountAmt ?? 0),
-          autoRoundOff: Boolean(autoRoundOff),
-          roundOffAmt: Number(roundOffAmt ?? 0),
-          customFieldValues: customFieldValues ?? {},
-          notes, termsConditions,
+          partyId:           partyId ? Number(partyId) : existing.partyId,
+          challanDate:       challanDate ? new Date(challanDate) : existing.challanDate,
+          eWayBillNo:        eWayBillNo        ?? existing.eWayBillNo,
+          challanNoRef:      challanNoRef      ?? existing.challanNoRef,
+          financedBy:        financedBy        ?? existing.financedBy,
+          salesman:          salesman          ?? existing.salesman,
+          emailId:           emailId           ?? existing.emailId,
+          warrantyPeriod:    warrantyPeriod    ?? existing.warrantyPeriod,
+          poNumber:          poNumber          ?? existing.poNumber,
+          vehicleNo:         vehicleNo         ?? existing.vehicleNo,
+          dispatchedThrough: dispatchedThrough ?? existing.dispatchedThrough,
+          transportName:     transportName     ?? existing.transportName,
+          shippingAddress:   shippingAddress   ?? existing.shippingAddress,
+          discountType:      discountType      ?? existing.discountType,
+          discountPct:       discPct,
+          discountAmt:       discAmt,
+          autoRoundOff:      Boolean(autoRoundOff),
+          roundOffAmt:       Number(roundOffAmt ?? 0),
+          customFieldValues: customFieldValues ?? existing.customFieldValues,
+          notes:             notes             ?? existing.notes,
+          termsConditions:   termsConditions   ?? existing.termsConditions,
           showEmptySignatureBox: Boolean(showEmptySignatureBox),
-          signatureUrl,
+          signatureUrl:      signatureUrl      ?? existing.signatureUrl,
+          subTotal,
+          taxAmount:         taxAmountTotal,
+          discountAmount:    discValue,
+          additionalChargesTotal: chargesTotal,
+          roundOff,
+          totalAmount,
           items: { create: itemRows },
           additionalCharges: {
-            create: additionalCharges.map((c: any) => ({
-              name: c.label ?? c.name,
-              amount: Number(c.amount),
-              taxLabel: c.taxLabel ?? c.tax ?? "No Tax Applicable",
-              taxAmount: 0,
+            create: (additionalCharges as any[]).map((c: any) => ({
+              name:      c.label || c.name || "",
+              amount:    Number(c.amount ?? 0),
+              taxLabel:  c.taxLabel || "No Tax Applicable",
+              taxAmount: null,
             })),
           },
         },
-        include: { items: true, additionalCharges: true, party: true },
+        include: {
+          party: true,
+          items: { include: ITEM_INCLUDE_WITH_STOCK },
+          additionalCharges: true,
+        },
       });
     });
 
-    return res.json(challan);
+    return res.json(updated);
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -435,15 +502,20 @@ export async function updateChallanStatus(req: Request, res: Response) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  CONVERT TO INVOICE
+//  CONVERT TO INVOICE  (data-only — NO status change)
 // ══════════════════════════════════════════════════════════════════════════════
 
 /**
  * POST /api/delivery-challan/:id/convert-to-invoice
  *
- * Marks the challan as CLOSED and returns a fully-formed
- * invoice-creation payload that the frontend feeds directly into
- * the Create Sales Invoice form via navigate state { fromChallan }.
+ * FIX: This endpoint NO LONGER marks the challan as CLOSED.
+ *
+ * It only returns the challan data shaped for CreateSalesInvoice.
+ * The status flip to CLOSED happens in CreateSalesInvoice.handleSave()
+ * via a PATCH to /:id/status AFTER the invoice is successfully saved.
+ *
+ * This prevents the challan from being marked CLOSED if the user
+ * navigates away from the sales invoice form without saving.
  */
 export async function convertToInvoice(req: Request, res: Response) {
   try {
@@ -457,26 +529,22 @@ export async function convertToInvoice(req: Request, res: Response) {
       },
     });
     if (!challan) return res.status(404).json({ error: "Challan not found" });
-    if (challan.status === "CLOSED") {
-      return res.status(400).json({ error: "Challan already converted / closed" });
-    }
     if (challan.status === "CANCELLED") {
       return res.status(400).json({ error: "Cannot convert a cancelled challan" });
     }
-
-    // Mark as CLOSED
-    await prisma.deliveryChallan.update({ where: { id }, data: { status: "CLOSED" } });
+    // NOTE: We allow converting a CLOSED challan (re-convert use-case)
+    // The frontend can decide whether to block this via UI.
 
     // Build fromChallan payload (matches what CreateSalesInvoice expects via route state)
     const fromChallan = {
       party: {
-        id: challan.party.id,
-        name: challan.party.name,
-        mobile: challan.party.mobileNumber ?? "",
-        balance: 0,
+        id:             challan.party.id,
+        name:           challan.party.name,
+        mobile:         challan.party.mobileNumber ?? "",
+        balance:        0,
         billingAddress: challan.party.billingAddress ?? "",
-        shippingAddress: challan.shippingAddress ?? challan.party.shippingAddress ?? "",
-        gstin: challan.party.gstin ?? "",
+        shippingAddress:challan.shippingAddress ?? challan.party.shippingAddress ?? "",
+        gstin:          challan.party.gstin ?? "",
       },
       billItems: challan.items.map((i) => ({
         rowId:       `row-${Date.now()}-${i.id}`,
@@ -507,6 +575,8 @@ export async function convertToInvoice(req: Request, res: Response) {
       notes:           challan.notes          ?? "",
       termsConditions: challan.termsConditions ?? "",
       challanNo:       challan.challanNo,
+      // FIX: sourceChallanId is returned so the frontend can pass it back
+      // via fromChallanId and close the challan after a successful invoice save.
       sourceChallanId: challan.id,
     };
 
@@ -597,7 +667,7 @@ export async function duplicateChallan(req: Request, res: Response) {
             })),
           },
         },
-        include: { items: true, additionalCharges: true, party: true },
+        include: { items: { include: ITEM_INCLUDE_WITH_STOCK }, additionalCharges: true, party: true },
       });
 
       if (settingsRec) {

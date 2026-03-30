@@ -20,6 +20,12 @@ export const createItem = async (req: Request, res: Response) => {
       showOnlineStore, itemCode, hsnCode, sacCode, description,
       salesDiscountPercent, lowStockAlert, lowStockQty, mrp, wholesalePrice,
       trackBatchExpiry,
+      // ── New pricing-mode fields (computed on frontend) ──────────────────────
+      baseSalesPrice,       // always the pre-tax base price (computed on FE)
+      salesPriceInclTax,    // boolean: was the entered salesPrice incl. of GST?
+      basePurchasePrice,    // always the pre-tax base purchase price
+      purchasePriceInclTax, // boolean: was the entered purchasePrice incl. of GST?
+      taxType,              // "with_tax" | "without_tax"
     } = req.body;
 
     if (!name || !itemType) {
@@ -37,8 +43,16 @@ export const createItem = async (req: Request, res: Response) => {
         hsnCode:             hsnCode             || null,
         sacCode:             sacCode             || null,
         description:         description         || null,
+        // ── Store price exactly as entered by the user ───────────────────────
         salesPrice:          cleanNumber(salesPrice),
         purchasePrice:       cleanNumber(purchasePrice),
+        // ── Store the computed pre-tax base prices (always used for billing) ─
+        baseSalesPrice:      cleanNumber(baseSalesPrice),
+        basePurchasePrice:   cleanNumber(basePurchasePrice),
+        salesPriceInclTax:   salesPriceInclTax   ?? false,
+        purchasePriceInclTax: purchasePriceInclTax ?? false,
+        taxType:             taxType || "without_tax",
+        // ─────────────────────────────────────────────────────────────────────
         gstRate:             gstRate             ? String(gstRate) : null,
         salesDiscountPercent: salesDiscountPercent ? Number(salesDiscountPercent) : null,
         unit,
@@ -94,7 +108,9 @@ export const createItem = async (req: Request, res: Response) => {
 ───────────────────────────────────────────── */
 export const getItems = async (req: Request, res: Response) => {
   try {
+    // Only return active items — "disabled" status means soft-deleted from the UI
     const items = await prisma.product.findMany({
+      where: { status: "active" },
       include: { ProductStock: true },
       orderBy: { createdAt: "desc" },
     });
@@ -220,10 +236,20 @@ export const getItemById = async (req: Request, res: Response) => {
         itemCode:        product.itemCode     ?? "",
         stockQty:        `${totalStock} ${product.unit ?? "PCS"}`,
         stockNumber:     totalStock,
-        sellingPrice:    product.salesPrice   ? Number(product.salesPrice)   : null,
-        purchasePrice:   product.purchasePrice ? Number(product.purchasePrice) : null,
+        // ── Prices ──────────────────────────────────────────────────────────
+        sellingPrice:    product.salesPrice     ? Number(product.salesPrice)     : null,
+        purchasePrice:   product.purchasePrice  ? Number(product.purchasePrice)  : null,
+        // Always-pre-tax base prices — used for billing calculations
+        baseSalesPrice:  product.baseSalesPrice  ? Number(product.baseSalesPrice)  : null,
+        basePurchasePrice: product.basePurchasePrice ? Number(product.basePurchasePrice) : null,
+        salesPriceInclTax:   product.salesPriceInclTax   ?? false,
+        purchasePriceInclTax: product.purchasePriceInclTax ?? false,
+        taxType:         product.taxType        ?? "without_tax",
+        salesDiscountPercent: product.salesDiscountPercent ?? null,
+        // ── Other fields ─────────────────────────────────────────────────────
         category:        product.category     ?? "",
         gstTaxRate:      product.gstRate      ? `${product.gstRate}%` : "0%",
+        gstRate:         product.gstRate      ?? "",
         hsnCode:         product.hsnCode      ?? "",
         secondaryUnit:   product.unit         ?? "-",
         lowStockQty:     product.lowStockQty  != null ? String(product.lowStockQty) : "-",
@@ -333,7 +359,7 @@ export const getItemsByGodown = async (req: Request, res: Response) => {
     }
 
     const stocks = await prisma.productStock.findMany({
-      where:   { godownId },
+      where:   { godownId, product: { status: "active" } },
       include: { product: true },
       orderBy: { createdAt: "desc" },
     });
@@ -364,7 +390,24 @@ export const updateItem = async (req: Request, res: Response) => {
     const {
       name, itemType, category, salesPrice, purchasePrice,
       gstRate, unit, description, itemCode, hsnCode, sacCode,
+      salesDiscountPercent,
+      // ── New pricing-mode fields ─────────────────────────────────────────────
+      baseSalesPrice,
+      salesPriceInclTax,
+      basePurchasePrice,
+      purchasePriceInclTax,
+      taxType,
+      status,  // ← accepts "disabled" for soft-delete, "active" to restore
     } = req.body;
+
+    // Soft-delete shortcut: if only status is being updated, skip field normalization
+    if (status && Object.keys(req.body).length === 1) {
+      const updatedItem = await prisma.product.update({
+        where: { id },
+        data:  { status },
+      });
+      return res.json({ success: true, data: updatedItem });
+    }
 
     const normalizedItemType = itemType?.toLowerCase() === "product" ? "Product" : "Service";
 
@@ -372,16 +415,23 @@ export const updateItem = async (req: Request, res: Response) => {
       where: { id },
       data: {
         name,
-        itemType:      normalizedItemType,
+        itemType:             normalizedItemType,
         category,
-        salesPrice:    cleanNumber(salesPrice),
-        purchasePrice: cleanNumber(purchasePrice),
-        gstRate:       gstRate ? String(gstRate) : null,
+        salesPrice:           cleanNumber(salesPrice),
+        purchasePrice:        cleanNumber(purchasePrice),
+        baseSalesPrice:       cleanNumber(baseSalesPrice),
+        basePurchasePrice:    cleanNumber(basePurchasePrice),
+        salesPriceInclTax:    salesPriceInclTax    ?? false,
+        purchasePriceInclTax: purchasePriceInclTax ?? false,
+        taxType:              taxType || "without_tax",
+        gstRate:              gstRate ? String(gstRate) : null,
+        salesDiscountPercent: salesDiscountPercent ? Number(salesDiscountPercent) : null,
         unit,
-        description:   description || null,
-        itemCode:      itemCode    || null,
-        hsnCode:       hsnCode     || null,
-        sacCode:       sacCode     || null,
+        description:          description || null,
+        itemCode:             itemCode    || null,
+        hsnCode:              hsnCode     || null,
+        sacCode:              sacCode     || null,
+        ...(status ? { status } : {}),
       },
     });
 
