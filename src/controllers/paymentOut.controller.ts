@@ -5,12 +5,12 @@ import prisma from "../utils/prisma";
 /* ─── Map frontend string → Prisma PaymentMode enum ─── */
 function toPaymentMode(mode: string): PaymentMode {
   const map: Record<string, PaymentMode> = {
-    cash:          PaymentMode.CASH,
-    upi:           PaymentMode.UPI,
-    card:          PaymentMode.CARD,
-    netbanking:    PaymentMode.NETBANKING,
+    cash: PaymentMode.CASH,
+    upi: PaymentMode.UPI,
+    card: PaymentMode.CARD,
+    netbanking: PaymentMode.NETBANKING,
     bank_transfer: PaymentMode.BANK_TRANSFER,
-    cheque:        PaymentMode.CHEQUE,
+    cheque: PaymentMode.CHEQUE,
   };
   return map[(mode ?? "cash").trim().toLowerCase()] ?? PaymentMode.CASH;
 }
@@ -29,6 +29,20 @@ export const createPaymentOut = async (req: Request, res: Response) => {
       paymentMode,
       notes,
     } = req.body;
+    const validModes = [
+      "cash",
+      "upi",
+      "card",
+      "netbanking",
+      "bank_transfer",
+      "cheque",
+    ];
+
+    if (paymentMode && !validModes.includes(paymentMode.toLowerCase())) {
+      return res.status(400).json({
+        message: "Invalid payment mode",
+      });
+    }
 
     if (!partyId) {
       return res.status(400).json({ message: "Party is required" });
@@ -70,7 +84,7 @@ export const createPaymentOut = async (req: Request, res: Response) => {
 
     const totalPending = pendingInvoices.reduce(
       (sum, inv) => sum + inv.balance,
-      0
+      0,
     );
 
     const totalEffect = Number(amountPaid) + Number(discount || 0);
@@ -104,7 +118,7 @@ export const createPaymentOut = async (req: Request, res: Response) => {
       if (remainingDiscount > 0) {
         appliedDiscount = Math.min(
           remainingDiscount,
-          remainingBalanceAfterPayment
+          remainingBalanceAfterPayment,
         );
         remainingDiscount -= appliedDiscount;
       }
@@ -192,10 +206,7 @@ export const createPaymentOut = async (req: Request, res: Response) => {
           Number(alloc.amountPaid) +
           Number(alloc.discount || 0);
 
-        const newBalance = Math.max(
-          0,
-          Number(invoice.totalAmount) - newPaid
-        );
+        const newBalance = Math.max(0, Number(invoice.totalAmount) - newPaid);
 
         let status: any = "OPEN";
 
@@ -246,7 +257,6 @@ export const createPaymentOut = async (req: Request, res: Response) => {
       message: "Payment created successfully",
       paymentId: payment.id,
     });
-
   } catch (error) {
     console.error("Create PaymentOut Error:", error);
 
@@ -371,11 +381,9 @@ export const deletePaymentOut = async (req: Request, res: Response) => {
         const reversedAmount =
           Number(alloc.amountPaid) + Number(alloc.discount || 0);
 
-        const newPaid =
-          Number(invoice.amountPaid || 0) - reversedAmount;
+        const newPaid = Number(invoice.amountPaid || 0) - reversedAmount;
 
-        const newBalance =
-          Number(invoice.totalAmount) - newPaid;
+        const newBalance = Number(invoice.totalAmount) - newPaid;
 
         await tx.purchaseInvoice.update({
           where: { id: alloc.purchaseInvoiceId },

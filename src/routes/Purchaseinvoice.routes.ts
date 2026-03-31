@@ -11,6 +11,7 @@ import {
   getPurchaseInvoiceSummary,
   getPendingInvoicesByParty,
   getNextPurchaseInvoiceNumber,
+   updatePurchaseInvoiceSignature,
 } from "../controllers/Purchaseinvoice.controller";
 
 import {
@@ -51,5 +52,5 @@ router.delete("/:id", deletePurchaseInvoice);
 ------------------------------------------------------- */
 router.patch("/:id/cancel", cancelPurchaseInvoice);
 router.patch("/:id/payment", recordPurchaseInvoicePayment);
-
+router.patch("/:id/signature", updatePurchaseInvoiceSignature);
 export default router;

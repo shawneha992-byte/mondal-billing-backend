@@ -19,7 +19,10 @@ import {
   PurchaseInvoiceStatus,
 } from "@prisma/client";
 import { getLastPartyBalanceTx } from "../services/ledger.service";
-import { writeStockLedger, reverseStockLedger } from "../services/stockLedger.service";
+import {
+  writeStockLedger,
+  reverseStockLedger,
+} from "../services/stockLedger.service";
 
 function calcTotals(
   items: any[],
@@ -144,7 +147,7 @@ export const createPurchaseInvoice = async (req: Request, res: Response) => {
     const {
       partyId,
       branchCode,
-      originalInvNo,          // FIX 1: added missing destructure
+      originalInvNo, // FIX 1: added missing destructure
       invoiceDate,
       dueDate,
       items = [],
@@ -164,6 +167,7 @@ export const createPurchaseInvoice = async (req: Request, res: Response) => {
       applyTcs = false,
       applyTds = false,
       autoRoundOff = false,
+      signatureUrl,
     } = req.body;
 
     if (!partyId)
@@ -174,7 +178,26 @@ export const createPurchaseInvoice = async (req: Request, res: Response) => {
     if (!items.length)
       return res
         .status(400)
-        .json({ success: false, message: "Invoice must contain at least one item" });
+        .json({
+          success: false,
+          message: "Invoice must contain at least one item",
+        });
+
+    const validModes = [
+      "CASH",
+      "UPI",
+      "CARD",
+      "NETBANKING",
+      "BANK_TRANSFER",
+      "CHEQUE",
+    ];
+
+    if (paymentMode && !validModes.includes(paymentMode)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payment mode",
+      });
+    }
 
     // godownId is optional — resolveGodownId() will auto-fetch from product if missing
     for (const item of items) {
@@ -220,8 +243,6 @@ export const createPurchaseInvoice = async (req: Request, res: Response) => {
         ? `${settings.prefix}${seq}`
         : String(seq);
 
-      
-
       const invoice = await tx.purchaseInvoice.create({
         data: {
           purchaseInvNo,
@@ -252,6 +273,7 @@ export const createPurchaseInvoice = async (req: Request, res: Response) => {
           applyTds,
           autoRoundOff,
           status: deriveStatus(paid, totalAmount),
+          signatureUrl: signatureUrl ?? null,
         },
       });
 
@@ -260,49 +282,48 @@ export const createPurchaseInvoice = async (req: Request, res: Response) => {
         data: { sequenceNumber: { increment: 1 } },
       });
 
-     /* ── items + stock ── */
-for (const item of items) {
+      /* ── items + stock ── */
+      for (const item of items) {
+        if (Number(item.quantity) <= 0) {
+          throw new Error(
+            `Quantity must be greater than zero for productId: ${item.productId}`,
+          );
+        }
 
-  if (Number(item.quantity) <= 0) {
-    throw new Error(
-      `Quantity must be greater than zero for productId: ${item.productId}`,
-    );
-  }
+        const base = Number(item.price) * Number(item.quantity);
+        const discount = Number(item.discount ?? 0);
+        const taxable = base - discount;
+        const tax = taxable * (Number(item.taxRate ?? 0) / 100);
 
-  const base = Number(item.price) * Number(item.quantity);
-  const discount = Number(item.discount ?? 0);
-  const taxable = base - discount;
-  const tax = taxable * (Number(item.taxRate ?? 0) / 100);
+        // ✅ Properly resolve godown from product stock if frontend did not send it
+        const godownId = await resolveGodownId(tx, item);
 
-  // ✅ Properly resolve godown from product stock if frontend did not send it
-  const godownId = await resolveGodownId(tx, item);
+        await tx.purchaseInvoiceItem.create({
+          data: {
+            purchaseInvoiceId: invoice.id,
+            productId: Number(item.productId),
+            godownId: godownId,
+            hsnSac: item.hsnSac ?? null,
+            quantity: Number(item.quantity),
+            price: Number(item.price),
+            discount: discount,
+            taxRate: Number(item.taxRate ?? 0),
+            taxAmount: tax,
+            total: taxable,
+          },
+        });
 
-  await tx.purchaseInvoiceItem.create({
-    data: {
-      purchaseInvoiceId: invoice.id,
-      productId: Number(item.productId),
-      godownId: godownId,
-      hsnSac: item.hsnSac ?? null,
-      quantity: Number(item.quantity),
-      price: Number(item.price),
-      discount: discount,
-      taxRate: Number(item.taxRate ?? 0),
-      taxAmount: tax,
-      total: taxable,
-    },
-  });
-
-  await writeStockLedger({
-  tx,
-  productId: Number(item.productId),
-  godownId,
-  refType: StockRefType.PURCHASE,
-  refId: invoice.id,
-  quantityIn: Number(item.quantity),
-  remarks: `Purchase Invoice ${invoice.purchaseInvNo}`,
-  date: invoice.invoiceDate,
-});
-}
+        await writeStockLedger({
+          tx,
+          productId: Number(item.productId),
+          godownId,
+          refType: StockRefType.PURCHASE,
+          refId: invoice.id,
+          quantityIn: Number(item.quantity),
+          remarks: `Purchase Invoice ${invoice.purchaseInvNo}`,
+          date: invoice.invoiceDate,
+        });
+      }
 
       /* ── additional charges ── */
       for (const charge of additionalCharges) {
@@ -369,7 +390,11 @@ for (const item of items) {
 export const getPurchaseInvoices = async (_req: Request, res: Response) => {
   try {
     const invoices = await prisma.purchaseInvoice.findMany({
-      include: { party: true, items: { include:{product: true}}, additionalCharges: true },
+      include: {
+        party: true,
+        items: { include: { product: true } },
+        additionalCharges: true,
+      },
       orderBy: { invoiceDate: "desc" },
     });
 
@@ -394,7 +419,11 @@ export const getPurchaseInvoiceById = async (req: Request, res: Response) => {
     const id = Number(req.params.id);
     const invoice = await prisma.purchaseInvoice.findUnique({
       where: { id },
-      include: { party: true, items: {include: { product: true}}, additionalCharges: true },
+      include: {
+        party: true,
+        items: { include: { product: true } },
+        additionalCharges: true,
+      },
     });
 
     if (!invoice)
@@ -435,11 +464,27 @@ export const updatePurchaseInvoice = async (req: Request, res: Response) => {
       applyTcs = false,
       applyTds = false,
       autoRoundOff = false,
+      signatureUrl,
     } = req.body;
 
     // godownId is optional — resolveGodownId() will auto-fetch from product if missing
     for (const item of items) {
       item.godownId = item.godownId ?? null;
+    }
+    const validModes = [
+      "CASH",
+      "UPI",
+      "CARD",
+      "NETBANKING",
+      "BANK_TRANSFER",
+      "CHEQUE",
+    ];
+
+    if (paymentMode && !validModes.includes(paymentMode)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payment mode",
+      });
     }
 
     const existing = await prisma.purchaseInvoice.findUnique({ where: { id } });
@@ -492,14 +537,19 @@ export const updatePurchaseInvoice = async (req: Request, res: Response) => {
           amountPaid: paid,
           balanceAmount,
           status: deriveStatus(paid, totalAmount),
+          signatureUrl: signatureUrl ?? null,
         },
       });
 
       /* ── reverse stock for old items via service ── */
       await reverseStockLedger(tx, StockRefType.PURCHASE, id);
 
-      await tx.purchaseInvoiceItem.deleteMany({ where: { purchaseInvoiceId: id } });
-      await tx.purchaseInvoiceAdditionalCharge.deleteMany({ where: { purchaseInvoiceId: id } });
+      await tx.purchaseInvoiceItem.deleteMany({
+        where: { purchaseInvoiceId: id },
+      });
+      await tx.purchaseInvoiceAdditionalCharge.deleteMany({
+        where: { purchaseInvoiceId: id },
+      });
 
       /* ── re-create items + increment stock ── */
       for (const item of items) {
@@ -533,16 +583,16 @@ export const updatePurchaseInvoice = async (req: Request, res: Response) => {
           },
         });
 
-       await writeStockLedger({
-  tx,
-  productId: Number(item.productId),
-  godownId,
-  refType: StockRefType.PURCHASE,
-  refId: id,
-  quantityIn: Number(item.quantity),
-  remarks: `Purchase Invoice Update`,
-  date: new Date(),
-});
+        await writeStockLedger({
+          tx,
+          productId: Number(item.productId),
+          godownId,
+          refType: StockRefType.PURCHASE,
+          refId: id,
+          quantityIn: Number(item.quantity),
+          remarks: `Purchase Invoice Update`,
+          date: new Date(),
+        });
       }
 
       for (const charge of additionalCharges) {
@@ -620,8 +670,12 @@ export const deletePurchaseInvoice = async (req: Request, res: Response) => {
       // Reverse all stock movements for this invoice via service
       await reverseStockLedger(tx, StockRefType.PURCHASE, id);
 
-      await tx.purchaseInvoiceItem.deleteMany({ where: { purchaseInvoiceId: id } });
-      await tx.purchaseInvoiceAdditionalCharge.deleteMany({ where: { purchaseInvoiceId: id } });
+      await tx.purchaseInvoiceItem.deleteMany({
+        where: { purchaseInvoiceId: id },
+      });
+      await tx.purchaseInvoiceAdditionalCharge.deleteMany({
+        where: { purchaseInvoiceId: id },
+      });
       await tx.partyLedger.deleteMany({
         where: { refId: id, refType: LedgerRefType.PurchaseInvoice },
       });
@@ -752,23 +806,27 @@ export const getPurchaseInvoiceSummary = async (
     ]);
 
     const statusMap: Record<string, number> = {};
-    statusCounts.forEach((c) => { statusMap[c.status] = c._count.id; });
+    statusCounts.forEach((c) => {
+      statusMap[c.status] = c._count.id;
+    });
 
     return res.json({
       success: true,
       data: {
-        totalPurchased:   totalAgg._sum?.totalAmount   ?? 0,
-        totalPaid:        totalAgg._sum?.amountPaid    ?? 0,
+        totalPurchased: totalAgg._sum?.totalAmount ?? 0,
+        totalPaid: totalAgg._sum?.amountPaid ?? 0,
         totalOutstanding: totalAgg._sum?.balanceAmount ?? 0,
-        openCount:        statusMap[PurchaseInvoiceStatus.OPEN]      ?? 0,
-        partialCount:     statusMap[PurchaseInvoiceStatus.PARTIAL]   ?? 0,
-        paidCount:        statusMap[PurchaseInvoiceStatus.PAID]      ?? 0,
-        cancelledCount:   statusMap[PurchaseInvoiceStatus.CANCELLED] ?? 0,
+        openCount: statusMap[PurchaseInvoiceStatus.OPEN] ?? 0,
+        partialCount: statusMap[PurchaseInvoiceStatus.PARTIAL] ?? 0,
+        paidCount: statusMap[PurchaseInvoiceStatus.PAID] ?? 0,
+        cancelledCount: statusMap[PurchaseInvoiceStatus.CANCELLED] ?? 0,
       },
     });
   } catch (error) {
     console.error("❌ getPurchaseInvoiceSummary:", error);
-    return res.status(500).json({ success: false, message: "Failed to fetch summary" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch summary" });
   }
 };
 
@@ -800,5 +858,33 @@ export const getPendingInvoicesByParty = async (
   } catch (error) {
     console.error("Pending Purchase Invoice Error:", error);
     res.status(500).json({ message: "Error fetching pending invoices" });
+  }
+};
+/* ═══════════════════════════════════════════════════════
+   UPDATE SIGNATURE  —  PATCH /api/purchase-invoices/:id/signature
+═══════════════════════════════════════════════════════ */
+export const updatePurchaseInvoiceSignature = async (
+  req: Request,
+  res: Response,
+) => {
+  try {
+    const id = Number(req.params.id);
+    const { signatureUrl } = req.body;
+
+    if (!signatureUrl) {
+      return res
+        .status(400)
+        .json({ success: false, message: "signatureUrl is required" });
+    }
+
+    const updated = await prisma.purchaseInvoice.update({
+      where: { id },
+      data: { signatureUrl },
+    });
+
+    return res.json({ success: true, data: updated });
+  } catch (error: any) {
+    console.error("updatePurchaseInvoiceSignature:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };

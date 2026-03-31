@@ -8,36 +8,42 @@ datasource db {
 }
 
 model Branch {
-  id                 Int                       @id @default(autoincrement())
-  branch_name        String
-  branch_code        String                    @unique
-  address            String?
-  status             Status                    @default(active)
-  invoices           Invoice[]
-  invoiceSettings    InvoiceSettings[]
-  paymentOutSettings PaymentOutSettings[]
-  purchaseInvoices   PurchaseInvoice[]
-  purchaseSettings   PurchaseInvoiceSettings[]
-  PurchaseOrder      PurchaseOrder[]
-  quotations         Quotation[]
-  quotationSettings  QuotationSettings[]
-  users              User[]
+  id                      Int                       @id @default(autoincrement())
+  branch_name             String
+  branch_code             String                    @unique
+  address                 String?
+  status                  Status                    @default(active)
+  invoices                Invoice[]
+  invoiceSettings         InvoiceSettings[]
+  paymentOutSettings      PaymentOutSettings[]
+  deliveryChallans        DeliveryChallan[]
+  deliveryChallanSettings DeliveryChallanSettings[]
+  proformaInvoices        ProformaInvoice[]
+  proformaSettings        ProformaSettings[]
+  purchaseInvoices        PurchaseInvoice[]
+  purchaseSettings        PurchaseInvoiceSettings[]
+  PurchaseOrder           PurchaseOrder[]
+  quotations              Quotation[]
+  quotationSettings       QuotationSettings[]
+  users                   User[]
 }
 
 model User {
-  id            Int           @id @default(autoincrement())
-  name          String
-  email         String?       @unique
-  mobile        String?       @unique
-  password_hash String
-  role          Role
-  branch_code   String?
-  isActive      Boolean       @default(true)
-  status        Status        @default(active)
-  created_at    DateTime      @default(now())
-  createdAt     DateTime      @default(now())
-  branch        Branch?       @relation(fields: [branch_code], references: [branch_code])
-  sessions      UserSession[]
+  id               Int           @id @default(autoincrement())
+  name             String
+  email            String?       @unique
+  mobile           String?       @unique
+  password_hash    String
+  role             Role
+  branch_code      String?
+  isActive         Boolean       @default(true)
+  status           Status        @default(active)
+  created_at       DateTime      @default(now())
+  createdAt        DateTime      @default(now())
+  reset_otp        String?
+  reset_otp_expiry DateTime?
+  branch           Branch?       @relation(fields: [branch_code], references: [branch_code])
+  sessions         UserSession[]
 }
 
 model UserSession {
@@ -75,6 +81,8 @@ model Party {
   bankAccounts       PartyBankAccount[]
   contacts           PartyContact[]
   customFields       PartyCustomField[]
+  deliveryChallans   DeliveryChallan[]
+  proformaInvoices   ProformaInvoice[]
   ledgerEntries      PartyLedger[]
   partyPrices        PartyWisePrice[]
   paymentsIn         PaymentIn[]
@@ -111,6 +119,14 @@ model Product {
   trackBatchExpiry     Boolean               @default(false)
   wholesaleEnabled     Boolean               @default(false)
   wholesalePrice       Decimal?              @db.Decimal(10, 2)
+taxType              String                @default("without_tax")
+baseSalesPrice       Decimal?              @db.Decimal(10, 2)   // always the pre-tax price
+salesPriceInclTax    Boolean               @default(false)      // was the entered price inclusive?
+basePurchasePrice    Decimal?              @db.Decimal(10, 2)   // always the pre-tax purchase price
+purchasePriceInclTax Boolean               @default(false)      // was the entered purchase price inclusive?
+  deliveryChallanItems DeliveryChallanItem[]
+  proformaInvoiceItems ProformaInvoiceItem[]
+
   invoiceItems         InvoiceItem[]
   partyPrices          PartyWisePrice[]
   ProductCustomField   ProductCustomField[]
@@ -130,19 +146,21 @@ model Category {
 }
 
 model Godown {
-  godown_id           Int                   @id @default(autoincrement())
-  godown_name         String
-  street_address      String?
-  state_name          String?
-  city_name           String?
-  pincode             String?
-  created_at          DateTime              @default(now())
-  InvoiceItem         InvoiceItem[]
-  stocks              ProductStock[]
-  ProformaInvoiceItem ProformaInvoiceItem[]
-  PurchaseInvoiceItem PurchaseInvoiceItem[]
-  QuotationItem       QuotationItem[]
-  stockLedger         StockLedger[]
+  godown_id            Int                   @id @default(autoincrement())
+  godown_name          String
+  street_address       String?
+  state_name           String?
+  city_name            String?
+  pincode              String?
+  created_at           DateTime              @default(now())
+  InvoiceItem          InvoiceItem[]
+  stocks               ProductStock[]
+  deliveryChallanItems DeliveryChallanItem[]
+  ProformaInvoiceItem  ProformaInvoiceItem[]
+  PurchaseInvoiceItem  PurchaseInvoiceItem[]
+  QuotationItem        QuotationItem[]
+  stockLedger          StockLedger[]
+  salesReturnItems   SalesReturnItem[]
 }
 
 model ProductStock {
@@ -233,33 +251,25 @@ model PaymentIn {
   date        DateTime
   mode        PaymentMode
   amount      Decimal             @db.Decimal(12, 2)
-
-  accountId   Int?                // ✅ ADD THIS
-  account     Account?            @relation(fields: [accountId], references: [id])
-
   notes       String?
   created_at  DateTime            @default(now())
-
-  
-
+  accountId   Int?
   allocations PaymentAllocation[]
+  account     Account?            @relation(fields: [accountId], references: [id])
   party       Party               @relation(fields: [partyId], references: [id])
 }
 
 model Account {
-  id            Int      @id @default(autoincrement())
+  id            Int         @id @default(autoincrement())
   accountHolder String
   bankName      String?
   accountNumber String?
   ifscCode      String?
   branchName    String?
   upiId         String?
-
   type          AccountType
-  balance       Decimal  @default(0) @db.Decimal(12,2)  // ✅ ADD THIS
-
-  createdAt     DateTime @default(now())
-
+  createdAt     DateTime    @default(now())
+  balance       Decimal     @default(0) @db.Decimal(12, 2)
   paymentsIn    PaymentIn[]
 }
 
@@ -307,9 +317,20 @@ model Invoice {
   quotationId            Int?                      @unique
   showEmptySignatureBox  Boolean                   @default(false)
   signatureUrl           String?
+  customFieldValues      Json?                     @default("{}")
+  snapshotMetaFields  Json?
+  dispatchedThrough      String?
+  financeDetails         Json?
+  paymentDetails         Json?
+  poNumber               String?
+  transportName          String?
+  vehicleNo              String?
   branch                 Branch?                   @relation(fields: [branchCode], references: [branch_code])
   party                  Party                     @relation(fields: [partyId], references: [id])
   quotation              Quotation?                @relation(fields: [quotationId], references: [id])
+  deliveryChallanId      Int?
+  deliveryChallan        DeliveryChallan?          @relation(fields: [deliveryChallanId], references: [id])
+  proformaSource         ProformaInvoice?
   additionalCharges      InvoiceAdditionalCharge[]
   items                  InvoiceItem[]
   allocations            PaymentAllocation[]
@@ -319,6 +340,24 @@ model Invoice {
   @@index([partyId])
   @@index([invoiceDate])
   @@index([branchCode])
+}
+
+model InvoiceDetailsSettings {
+  id                    Int      @id @default(autoincrement())
+  branchCode            String?
+  showChallan           Boolean  @default(true)
+  showDispatchedThrough Boolean  @default(false)
+  showEmailId           Boolean  @default(true)
+  showFinancedBy        Boolean  @default(true)
+  showSalesman          Boolean  @default(true)
+  showTransportName     Boolean  @default(false)
+  showWarranty          Boolean  @default(true)
+  showPO                Boolean  @default(false)
+  showEwayBill          Boolean  @default(true)
+  showVehicle           Boolean  @default(false)
+  customFields          Json     @default("[]")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
 }
 
 model PartyContact {
@@ -351,24 +390,34 @@ model PartyAddress {
 }
 
 model SalesReturn {
-  id          Int               @id @default(autoincrement())
-  invoiceId   Int
-  partyId     Int
-  totalAmount Float
-  createdAt   DateTime          @default(now())
-  invoice     Invoice           @relation(fields: [invoiceId], references: [id])
-  party       Party             @relation(fields: [partyId], references: [id])
-  items       SalesReturnItem[]
+  id           Int               @id @default(autoincrement())
+  invoiceId    Int             
+  partyId      Int
+  totalAmount  Float
+  reason       String?
+  notes        String?
+  returnStatus String            @default("Refunded")
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  invoice      Invoice           @relation(fields: [invoiceId], references: [id])
+  party        Party             @relation(fields: [partyId], references: [id])
+  items        SalesReturnItem[]
+
+  @@index([partyId])
 }
 
 model SalesReturnItem {
-  id            Int         @id @default(autoincrement())
+  id            Int          @id @default(autoincrement())
   salesReturnId Int
   productId     Int
   quantity      Int
   price         Float
-  product       Product     @relation(fields: [productId], references: [id])
-  salesReturn   SalesReturn @relation(fields: [salesReturnId], references: [id])
+  godownId      Int?         // ← which godown stock is returned to
+
+  product       Product      @relation(fields: [productId], references: [id])
+  salesReturn   SalesReturn  @relation(fields: [salesReturnId], references: [id], onDelete: Cascade)
+  godown        Godown?      @relation(fields: [godownId], references: [godown_id])
 }
 
 model Quotation {
@@ -459,51 +508,156 @@ model InvoiceSettings {
 }
 
 model ProformaInvoice {
-  id             String                @id @default(uuid())
-  proformaNumber String                @unique
-  date           DateTime              @default(now())
-  customerName   String
-  customerPhone  String?
-  quotationId    String?
-  subTotal       Float
-  taxAmount      Float
-  discountAmount Float                 @default(0)
-  grandTotal     Float
-  status         ProformaStatus        @default(DRAFT)
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
-  items          ProformaInvoiceItem[]
+  id         Int    @id @default(autoincrement())
+  proformaNo String @unique
+
+  // ── Relations (FKs) ──
+  partyId       Int
+  branchCode    String?
+  bankAccountId Int?
+
+  // ── Dates ──
+  proformaDate     DateTime  @default(now())
+  validTill        DateTime?
+  paymentTermsDays Int?
+
+  // ── Extra header fields ──
+  ewayBillNo        String?
+  challanNo         String?
+  financedBy        String?
+  salesman          String?
+  emailId           String?
+  warrantyPeriod    String?
+  poNumber          String?
+  vehicleNo         String?
+  dispatchedThrough String?
+  transportName     String?
+
+  // ── Addresses ──
+  shippingAddress Json?
+
+  // ── Totals ──
+  subTotal               Decimal? @db.Decimal(12, 2)
+  taxableAmount          Decimal? @db.Decimal(12, 2)
+  discountAmount         Decimal? @db.Decimal(12, 2)
+  additionalChargesTotal Decimal? @db.Decimal(12, 2)
+  taxAmount              Decimal? @db.Decimal(12, 2)
+  roundOff               Decimal? @db.Decimal(12, 2)
+  totalAmount            Decimal  @db.Decimal(12, 2)
+
+  // ── Discount / adjustment ──
+  discountType String?
+  discountPct  Decimal? @default(0) @db.Decimal(5, 2)
+  discountAmt  Decimal? @default(0) @db.Decimal(10, 2)
+  adjustType   String?
+  adjustAmt    Decimal? @default(0) @db.Decimal(10, 2)
+  autoRoundOff Boolean  @default(false)
+
+  // ── Notes / terms ──
+  notes           String?
+  termsConditions String?
+
+  // ── Custom fields ──
+  customFieldValues Json?
+
+  // ── Signature ──
+  showEmptySignatureBox Boolean @default(false)
+  signatureUrl          String?
+
+  // ── Status ──
+  status ProformaStatus @default(DRAFT)
+
+  // ── Conversion tracking ──
+  convertedToInvoiceId Int?      @unique
+  convertedAt          DateTime?
+
+  // ── Timestamps ──
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──
+  party            Party             @relation(fields: [partyId], references: [id])
+  branch           Branch?           @relation(fields: [branchCode], references: [branch_code])
+  convertedInvoice Invoice?          @relation(fields: [convertedToInvoiceId], references: [id])
+  bankAccount      PartyBankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+
+  items             ProformaInvoiceItem[]
+  additionalCharges ProformaAdditionalCharge[]
+
+  // ── Indexes ──
+  @@index([status, branchCode])
+  @@index([convertedToInvoiceId])
+  @@index([partyId])
+  @@index([proformaDate])
 }
 
 model ProformaInvoiceItem {
-  id                String          @id @default(uuid())
-  proformaInvoiceId String
-  productName       String
-  quantity          Int
-  rate              Float
-  taxPercent        Float
-  taxAmount         Float
-  total             Float
-  godownId          Int?
-  godown            Godown?         @relation(fields: [godownId], references: [godown_id])
-  proformaInvoice   ProformaInvoice @relation(fields: [proformaInvoiceId], references: [id], onDelete: Cascade)
+  id          Int      @id @default(autoincrement())
+  proformaId  Int
+  productId   Int? // nullable — user may type a free-text item
+  productName String // always store the display name
+  description String?
+  hsnSac      String?
+  quantity    Decimal  @db.Decimal(10, 3)
+  unit        String?  @default("PCS")
+  price       Decimal  @db.Decimal(10, 2)
+  discountPct Float?   @default(0)
+  discountAmt Float?   @default(0)
+  taxLabel    String?  @default("None")
+  taxRate     Float?   @default(0)
+  taxAmount   Decimal? @db.Decimal(10, 2)
+  total       Decimal  @db.Decimal(10, 2)
+  godownId    Int?
+
+  proformaInvoice ProformaInvoice @relation(fields: [proformaId], references: [id], onDelete: Cascade)
+  product         Product?        @relation(fields: [productId], references: [id])
+  godown          Godown?         @relation(fields: [godownId], references: [godown_id])
+
+  @@index([proformaId])
+  @@index([productId])
+}
+
+model ProformaAdditionalCharge {
+  id         Int      @id @default(autoincrement())
+  proformaId Int
+  name       String
+  amount     Decimal  @db.Decimal(10, 2)
+  taxLabel   String?  @default("No Tax Applicable")
+  taxAmount  Decimal? @db.Decimal(10, 2)
+
+  proforma ProformaInvoice @relation(fields: [proformaId], references: [id], onDelete: Cascade)
+}
+
+model ProformaSettings {
+  id             Int      @id @default(autoincrement())
+  prefix         String?
+  sequenceNumber Int      @default(1)
+  enablePrefix   Boolean  @default(false)
+  showItemImage  Boolean  @default(false)
+  priceHistory   Boolean  @default(false)
+  branchCode     String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  branch Branch? @relation(fields: [branchCode], references: [branch_code])
 }
 
 model InvoiceItem {
-  id        Int      @id @default(autoincrement())
-  invoiceId Int
-  productId Int
-  quantity  Int
-  price     Decimal  @db.Decimal(10, 2)
-  total     Decimal  @db.Decimal(10, 2)
-  discount  Decimal? @db.Decimal(10, 2)
-  discountPct Float?    
-  taxAmount Decimal? @db.Decimal(10, 2)
-  taxRate   Float?
-  godownId  Int?
-  godown    Godown?  @relation(fields: [godownId], references: [godown_id])
-  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  product   Product  @relation(fields: [productId], references: [id])
+  id          Int      @id @default(autoincrement())
+  invoiceId   Int
+  productId   Int?     // nullable — user may type a free-text item
+  productName String?  // always store the display name for free-text items
+  quantity    Int
+  price       Decimal  @db.Decimal(10, 2)
+  total       Decimal  @db.Decimal(10, 2)
+  discount    Decimal? @db.Decimal(10, 2)
+  taxAmount   Decimal? @db.Decimal(10, 2)
+  taxRate     Float?
+  godownId    Int?
+  discountPct Float?
+  godown      Godown?  @relation(fields: [godownId], references: [godown_id])
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product     Product? @relation(fields: [productId], references: [id])
 
   @@index([invoiceId])
   @@index([productId])
@@ -511,25 +665,28 @@ model InvoiceItem {
 }
 
 model InvoiceAdditionalCharge {
-  id        Int     @id @default(autoincrement())
+  id        Int      @id @default(autoincrement())
   invoiceId Int
   name      String
-  amount    Decimal @db.Decimal(10, 2)
-  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amount    Decimal  @db.Decimal(10, 2)
+  taxAmount Decimal? @db.Decimal(10, 2)
+  taxLabel  String?  @default("No Tax Applicable")
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 }
 
 model PartyBankAccount {
-  id            Int      @id @default(autoincrement())
-  partyId       Int
-  accountHolder String
-  accountNumber String
-  bankName      String
-  ifscCode      String
-  branchName    String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  upiId         String?
-  party         Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  id              Int               @id @default(autoincrement())
+  partyId         Int
+  accountHolder   String
+  accountNumber   String
+  bankName        String
+  ifscCode        String
+  branchName      String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  upiId           String?
+  party           Party             @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  ProformaInvoice ProformaInvoice[]
 
   @@unique([partyId, accountNumber])
   @@index([partyId])
@@ -578,9 +735,8 @@ model PurchaseInvoice {
   status                 PurchaseInvoiceStatus             @default(OPEN)
   createdAt              DateTime                          @default(now())
   updatedAt              DateTime                          @updatedAt
-  showEmptySignatureBox  Boolean                     @default(false)
+  showEmptySignatureBox  Boolean                           @default(false)
   signatureUrl           String?
-
   paymentOutInvoices     PaymentOutInvoice[]
   branch                 Branch?                           @relation(fields: [branchCode], references: [branch_code])
   party                  Party                             @relation(fields: [partyId], references: [id])
@@ -739,6 +895,126 @@ model PurchaseOrderHistory {
   @@index([purchaseOrderId])
 }
 
+model DeliveryChallan {
+  id         Int     @id @default(autoincrement())
+  challanNo  String  @unique
+  partyId    Int
+  branchCode String?
+
+  // ── Header dates ──
+  challanDate DateTime @default(now())
+
+  // ── Optional meta fields (mirror Invoice fields) ──
+  eWayBillNo        String?
+  challanNoRef      String? // "reference challan no" from the form
+  financedBy        String?
+  salesman          String?
+  emailId           String?
+  warrantyPeriod    String?
+  poNumber          String?
+  vehicleNo         String?
+  dispatchedThrough String?
+  transportName     String?
+
+  // ── Address ──
+  shippingAddress String?
+
+  // ── Totals ──
+  subTotal               Decimal? @db.Decimal(12, 2)
+  taxAmount              Decimal? @db.Decimal(12, 2)
+  discountAmount         Decimal? @db.Decimal(12, 2)
+  additionalChargesTotal Decimal? @db.Decimal(12, 2)
+  roundOff               Decimal? @db.Decimal(12, 2)
+  totalAmount            Decimal  @db.Decimal(12, 2)
+
+  // ── Discount settings ──
+  discountType String? // "After Tax" | "Before Tax"
+  discountPct  Float?  @default(0)
+  discountAmt  Float?  @default(0)
+  autoRoundOff Boolean @default(false)
+  roundOffAmt  Float?  @default(0)
+
+  // ── Custom fields (same pattern as Invoice.customFieldValues) ──
+  customFieldValues Json? @default("{}")
+
+  // ── Notes / terms ──
+  notes           String?
+  termsConditions String?
+
+  // ── Signature ──
+  showEmptySignatureBox Boolean @default(false)
+  signatureUrl          String?
+
+  // ── Status ──
+  status DeliveryChallanStatus @default(OPEN)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──
+  branch            Branch?                           @relation(fields: [branchCode], references: [branch_code])
+  party             Party                             @relation(fields: [partyId], references: [id])
+  items             DeliveryChallanItem[]
+  additionalCharges DeliveryChallanAdditionalCharge[]
+  invoices          Invoice[] // challans converted to invoices
+
+  @@index([partyId])
+  @@index([challanDate])
+  @@index([branchCode])
+  @@index([status])
+}
+
+model DeliveryChallanItem {
+  id          Int      @id @default(autoincrement())
+  challanId   Int
+  productId   Int? // nullable – user may type a free-text item
+  productName String // always store the display name
+  hsnSac      String?
+  description String?
+  quantity    Decimal  @db.Decimal(10, 3)
+  unit        String?  @default("PCS")
+  price       Decimal  @db.Decimal(10, 2)
+  discountPct Float?   @default(0)
+  discountAmt Float?   @default(0)
+  taxLabel    String?  @default("None")
+  taxRate     Float?   @default(0)
+  taxAmount   Decimal? @db.Decimal(10, 2)
+  total       Decimal  @db.Decimal(10, 2)
+  godownId    Int?
+
+  challan DeliveryChallan @relation(fields: [challanId], references: [id], onDelete: Cascade)
+  product Product?        @relation(fields: [productId], references: [id])
+  godown  Godown?         @relation(fields: [godownId], references: [godown_id])
+
+  @@index([challanId])
+  @@index([productId])
+}
+
+model DeliveryChallanAdditionalCharge {
+  id        Int      @id @default(autoincrement())
+  challanId Int
+  name      String
+  amount    Decimal  @db.Decimal(10, 2)
+  taxLabel  String?  @default("No Tax Applicable")
+  taxAmount Decimal? @db.Decimal(10, 2)
+
+  challan DeliveryChallan @relation(fields: [challanId], references: [id], onDelete: Cascade)
+}
+
+model DeliveryChallanSettings {
+  id             Int      @id @default(autoincrement())
+  prefix         String?
+  sequenceNumber Int      @default(1)
+  enablePrefix   Boolean  @default(false)
+  showItemImage  Boolean  @default(true)
+  priceHistory   Boolean  @default(true)
+  branchCode     String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  branch Branch? @relation(fields: [branchCode], references: [branch_code])
+}
+
 enum PurchaseOrderStatus {
   OPEN
   CLOSED
@@ -817,6 +1093,7 @@ enum QuotationStatus {
 enum ProformaStatus {
   DRAFT
   SENT
+  CONVERTED
   CANCELLED
 }
 
@@ -830,6 +1107,13 @@ enum StockRefType {
   PURCHASE
   SALE
   SALES_RETURN
+  DELIVERY_CHALLAN
   PURCHASE_RETURN
   ADJUSTMENT
+}
+
+enum DeliveryChallanStatus {
+  OPEN
+  CLOSED
+  CANCELLED
 }
