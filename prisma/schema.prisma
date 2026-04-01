@@ -647,6 +647,9 @@ model InvoiceItem {
   invoiceId   Int
   productId   Int?     // nullable — user may type a free-text item
   productName String?  // always store the display name for free-text items
+  description String?
+  itemCode   String?
+  
   quantity    Int
   price       Decimal  @db.Decimal(10, 2)
   total       Decimal  @db.Decimal(10, 2)

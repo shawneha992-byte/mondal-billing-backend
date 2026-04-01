@@ -6,6 +6,7 @@ import {
   getPartyById,
   deleteParty,
 } from "../controllers/party.controller";
+import { getGstDetails } from "../controllers/party.controller";
 import {
   addBankAccount,
   getBankAccounts,
@@ -24,6 +25,7 @@ const router = express.Router();
 // ── Party CRUD ────────────────────────────────────────────────────────────────
 router.post(  "/",     createParty);    // POST   /api/parties
 router.get(   "/",     getAllParties);  // GET    /api/parties
+ router.post("/parties/gst-details", getGstDetails); 
 router.get(   "/:id",  getPartyById);  // GET    /api/parties/:id
 router.put(   "/:id",  updateParty);   // PUT    /api/parties/:id
 router.delete("/:id",  deleteParty);   // DELETE /api/parties/:id
