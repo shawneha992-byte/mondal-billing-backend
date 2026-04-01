@@ -305,6 +305,8 @@ export const createInvoice = async (req: Request, res: Response) => {
               invoiceId:   inv.id,
               productId:   item.productId != null ? Number(item.productId) : null,
               productName: item.productName ?? item.name ?? null,
+                description: item.description ?? null, 
+              itemCode:    item.itemCode ?? null, 
               godownId:    item.godownId   != null ? Number(item.godownId)  : null,
               quantity:    Number(item.quantity),
               price:       Number(item.price),
