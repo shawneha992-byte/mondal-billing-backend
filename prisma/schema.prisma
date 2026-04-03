@@ -649,6 +649,7 @@ model InvoiceItem {
   productName String?  // always store the display name for free-text items
   description String?
   itemCode   String?
+  hsnCode String?
   
   quantity    Int
   price       Decimal  @db.Decimal(10, 2)
