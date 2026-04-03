@@ -307,6 +307,7 @@ export const createInvoice = async (req: Request, res: Response) => {
               productName: item.productName ?? item.name ?? null,
                 description: item.description ?? null, 
               itemCode:    item.itemCode ?? null, 
+              hsnCode: item.hsn || item.hsnCode || null,
               godownId:    item.godownId   != null ? Number(item.godownId)  : null,
               quantity:    Number(item.quantity),
               price:       Number(item.price),
@@ -556,6 +557,7 @@ export const getInvoiceById = async (req: Request, res: Response) => {
     invoice.items = (invoice.items ?? []).map((item: any) => ({
       ...item,
       product: item.productId != null ? (productMap.get(Number(item.productId)) ?? null) : null,
+        hsn: item.hsnCode || item.product?.hsnCode || ""
     }));
 
     return res.json({ success: true, data: invoice });
